@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import time
+from tqdm import tqdm
 
 import hydra
 from hydra.utils import to_absolute_path
@@ -201,10 +202,18 @@ def main(cfg: DictConfig) -> None:
 
         epoch_loss = 0.0
 
-        for graph in trainer.dataloader:
+        # for graph in trainer.dataloader:
+        #     loss = trainer.train(graph)
+        #     epoch_loss += loss.detach().cpu()
+        pbar = tqdm(trainer.dataloader, desc=f"Epoch {epoch}/{cfg.epochs-1}")
+
+        for graph in pbar:
             loss = trainer.train(graph)
             epoch_loss += loss.detach().cpu()
 
+            # 2. 核心功能：在进度条右侧实时更新当前的 Loss 值
+            pbar.set_postfix({'loss': f"{loss.item():.4e}"})
+        
         epoch_loss /= len(trainer.dataloader)
         rank_zero_logger.info(
             f"epoch: {epoch}, loss: {epoch_loss:10.3e}, time per epoch: {(time.time() - start):10.3e}"

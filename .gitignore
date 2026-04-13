@@ -181,3 +181,5 @@ sbatch_logs/
 
 # ASV
 .asv/
+
+examples/cfd/vortex_shedding_mgn/raw_dataset/
