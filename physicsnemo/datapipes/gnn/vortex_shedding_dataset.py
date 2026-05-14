@@ -119,6 +119,33 @@ class VortexSheddingDataset(Dataset):
             # Slice to num_steps for each feature.
             data_np = {key: arr[:num_steps] for key, arr in data_np.items()}
             features, targets = {}, {}
+
+            # 为了说明数据到底是什么样，我们先明确原始数据的结构。假设一个流体仿真样本包含 $T$ 个时间步，物理网格包含 $N$ 个节点，且这是一个二维流体问题。
+
+            # ### 1. `targets["velocity"]`
+
+            # * **执行代码**：`self._push_forward_diff(data_np["velocity"])`
+            # * **数据形态**：它是一个多维数组（张量），形状为 `(T-1, N, 2)`。
+            #     * `T-1`：表示时间序列的总长度减少了 1 步。
+            #     * `N`：表示网格节点的总数。
+            #     * `2`：表示速度有两个分量（X 轴方向和 Y 轴方向）。
+            # * **表示的意思**：它存储的是**当前时刻到下一时刻的速度变化量（速度增量）**。
+            #     * 具体计算方式是：用第 $t+1$ 时刻的速度坐标减去第 $t$ 时刻的速度坐标。即 $\Delta V = V_{t+1} - V_t$。
+            #     * 对于张量中的任意一个时间步索引 $t$ 和节点索引 $n$，里面存储的具体数值是该节点在 $t+1$ 时刻与 $t$ 时刻的 $[X方向速度差, Y方向速度差]$。
+
+            # ### 2. `targets["pressure"]`
+
+            # * **执行代码**：`self._push_forward(data_np["pressure"])`
+            # * **数据形态**：它是一个多维数组，形状为 `(T-1, N, 1)`。
+            #     * `1`：表示压力是一个单一的标量数值。
+            # * **表示的意思**：它存储的是**下一时刻的绝对压力值**。
+            #     * 通过将原始数据索引整体向后平移一位（即丢弃第 0 个时刻的数据，保留第 1 到最后一个时刻的数据）得到。
+            #     * 对于给定的时间步索引 $t$，里面存储的具体数值是第 $t+1$ 时刻该网格节点的实际压力 $P_{t+1}$。
+
+            # 要完全理解 `targets` 的意义，需要结合它的输入 `features` 来看代码中的时间对齐逻辑：
+
+            # 1.  `features["velocity"] = self._drop_last(...)` 提取了第 $0$ 到 $T-2$ 时刻的数据，作为神经网络的输入。
+            # 2.  `targets` 提取并计算了第 $1$ 到 $T-1$ 时刻的数据，作为神经网络预测的目标。
             features["velocity"] = self._drop_last(data_np["velocity"])
             targets["velocity"] = self._push_forward_diff(data_np["velocity"])
             targets["pressure"] = self._push_forward(data_np["pressure"])
@@ -162,6 +189,21 @@ class VortexSheddingDataset(Dataset):
         gidx = idx // (self.num_steps - 1)  # graph index
         tidx = idx % (self.num_steps - 1)  # time step index
         graph = self.graphs[gidx]
+
+        # * **`gidx` 和 `tidx`**：由于这是一个瞬态流体仿真数据集（包含多张图，每张图包含多个时间步），这里通过数学取余和整除，算出当前需要抓取的是“第几个仿真（图）的第几个时间步”。
+        # * **`torch.cat(..., dim=-1)`**：将两个不同的张量在特征维度（最后一个维度）上拼接起来，形成最终的节点特征。
+        #     * **第一部分 `self.node_features[gidx]["velocity"][tidx]`**：这是节点在当前时间步的**速度特征**。因为这是一个二维卡门涡街流体仿真，速度包含 X 方向和 Y 方向的分量。**（此处贡献 2 个特征维度）**
+        #     * **第二部分 `self.node_type[gidx]`**：这正是上面 `_one_hot_encode` 函数输出的结果。**（此处贡献 4 个特征维度）**
+
+        # ### config.yaml 写的是 `num_input_features: 6`
+        # 神经网络模型（MeshGraphNet 的节点编码器）在接收每个节点的数据时，看到的是经过 `torch.cat` 拼接后的一个长向量。
+        # 这个长向量的构成是：
+        # **速度分量 (2维) + 节点独热类型 (4维) = 6 个维度**
+        # 例如，一个流体内部节点（类型 0）的某个时刻的数据长这样：
+        # `[Vx, Vy, 1, 0, 0, 0]`
+        # 一个上方墙壁节点（类型 6 -> 映射为 3）的数据长这样：
+        # `[Vx, Vy, 0, 0, 0, 1]`
+
         node_features = torch.cat(
             (self.node_features[gidx]["velocity"][tidx], self.node_type[gidx]), dim=-1
         )
@@ -305,6 +347,34 @@ class VortexSheddingDataset(Dataset):
         )
         return dataset
 
+    # 这两段代码的核心作用是将流体仿真中的**物理网格（Mesh）数据**，转换为图神经网络（GNN）可以处理的**图结构（Graph）数据**。
+
+    # ### 1. `cell_to_adj(cells)`：从网格单元提取边关系
+
+    # 这个函数的作用是读取网格中的三角形单元，并提取出顶点与顶点之间的连接关系，输出 COO（Coordinate Format）格式的起点和终点列表。
+
+    # * **输入 `cells`**：是一个二维数组，表示物理网格中的三角形单元（Cells）。数组的形状为 `(num_cells, 3)`。每一行代表一个三角形，包含该三角形 3 个顶点的索引号。例如，某一行的数据是 `[A, B, C]`。
+    # * **`num_cells = np.shape(cells)[0]`**：获取网格中三角形单元的总数。
+    # * **`src` 的推导式**：`indx` 按照 `[0, 1, 2]` 的顺序取值。对于三角形 `[A, B, C]`，提取出的起点依次为 `A, B, C`。
+    # * **`dst` 的推导式**：`indx` 按照 `[1, 2, 0]` 的顺序取值。对于同一个三角形 `[A, B, C]`，提取出的终点依次为 `B, C, A`。
+    # * **逻辑结果**：将 `src` 和 `dst` 上下对应来看，这实际上是在三角形的三个顶点之间建立了三条有向边：
+    #     * 起点 A $\rightarrow$ 终点 B
+    #     * 起点 B $\rightarrow$ 终点 C
+    #     * 起点 C $\rightarrow$ 终点 A
+    #     这种方式为每一个三角形单元建立了一个内部的闭环有向连接。
+
+    # ### 2. `create_graph(src, dst, dtype)`：构建 PyTorch Geometric 图对象
+
+    # 这个函数接收上一步生成的 `src` 和 `dst` 列表，将其转换为 PyTorch Geometric (PyG) 框架标准的图数据格式，并处理图的无向性。
+
+    # * **`torch.stack([...], dim=0).long()`**：
+    #     * 首先将 Python 列表 `src` 和 `dst` 转换为 PyTorch 张量。
+    #     * 然后在第 0 维度（上下方向）将它们堆叠起来。这会生成一个形状为 `(2, num_edges)` 的张量。在 PyG 中，这被称为 `edge_index`，第一行代表所有的起点，第二行代表对应的终点。
+    #     * `.long()` 将数据类型转换为 64 位整数（int64）。
+    # * **`pyg.utils.to_undirected(edges)`**：这一步非常关键，包含两个隐藏操作：
+    #     1.  **转换为无向图**：前一个函数 `cell_to_adj` 生成的是单向环（例如只有 $A \rightarrow B$）。此函数会自动补充反向边（添加 $B \rightarrow A$），使得节点之间的连接是双向的（无向图）。
+    #     2.  **去重**：在物理网格中，相邻的两个三角形通常会共享一条边。前一步对每个三角形独立处理，会导致共享边被重复计算。此函数会自动识别并剔除重复的边索引，保持图结构的精简。
+    # * **`pyg.data.Data(...)`**：将处理完毕的 `edge_index` 传入 PyG 的图数据容器 `Data` 中，返回一个标准的图对象。后续可以在这个对象上继续附加节点特征（如速度、压力）和边特征（如相对距离）。
     @staticmethod
     def cell_to_adj(cells):
         """creates adjancy matrix in COO format from mesh cells"""
@@ -323,6 +393,51 @@ class VortexSheddingDataset(Dataset):
         graph = pyg.data.Data(edge_index=pyg.utils.to_undirected(edges))
         return graph
 
+    # 这段代码的作用是为已经构建好的图结构（Graph）计算并添加**边特征（Edge Features）**。
+
+    # 在图神经网络（GNN）处理物理网格数据时，节点通常代表网格点，而边代表网格点之间的连接。为了让神经网络理解物理空间的几何结构，我们需要显式地告诉模型两个相连节点之间的相对位置关系。这就是这段代码的核心目的。
+
+    # 下面逐行拆解代码逻辑，并解释为什么 `config.yaml` 中 `num_edge_features` 是 3。
+
+    # ### 代码逐行解析
+
+    # **1. `row, col = graph.edge_index`**
+    # * `graph.edge_index` 是一个形状为 `(2, 边的总数)` 的张量，记录了图中所有的连接关系。
+    # * 第一行（索引 0）是所有边的起点索引，赋值给 `row`。
+    # * 第二行（索引 1）是所有边的终点索引，赋值给 `col`。
+
+    # **2. `disp = torch.tensor(pos[row] - pos[col])`**
+    # * `pos` 是一个张量，存储了所有节点的物理坐标。
+    # * `pos[row]` 获取了所有起点的坐标，`pos[col]` 获取了所有终点的坐标。
+    # * 两者相减，计算出的是每一条边的**相对位移向量（Relative Displacement）**。它表示从终点指向起点的向量（或者反过来，取决于具体定义，这里是起点坐标减去终点坐标）。
+
+    # **3. `disp_norm = torch.linalg.norm(disp, dim=-1, keepdim=True)`**
+    # * 这一步计算上述位移向量的**范数（Norm）**，在欧几里得空间中，这也就是两个节点之间的**绝对直线距离**。
+    # * `dim=-1` 表示在最后一个维度（坐标轴维度）上求范数。
+    # * `keepdim=True` 确保输出张量保持原有的维度结构（形状为 `(边的总数, 1)`），方便后续拼接。
+
+    # **4. `graph.edge_attr = torch.cat((disp, disp_norm), dim=1)`**
+    # * `torch.cat` 将“相对位移向量”和“绝对距离”在特征维度（`dim=1`）上拼接在一起。
+    # * 将拼接后的结果赋值给 `graph.edge_attr`，作为图中所有边的最终特征。
+
+    # ---
+
+    # ### 为什么 `num_edge_features: 3`？
+
+    # 这与你正在处理的数据集（Vortex Shedding，卡门涡街流体仿真）的物理维度直接相关。
+
+    # 卡门涡街仿真通常是一个 **二维（2D）流体问题**。
+    # 这意味着 `pos` 中的坐标只包含 X 和 Y 两个方向的值。
+
+    # 根据代码的拼接逻辑 `torch.cat((disp, disp_norm), dim=1)`，我们来计算一下最终边特征的维度构成：
+
+    # 1.  **`disp`（相对位移向量）**：包含 X 方向的位移差 $\Delta x$ 和 Y 方向的位移差 $\Delta y$。**（贡献 2 个特征维度）**
+    # 2.  **`disp_norm`（绝对距离）**：由公式 $\sqrt{\Delta x^2 + \Delta y^2}$ 计算得出的单一标量数值。**（贡献 1 个特征维度）**
+
+    # 将它们拼接在一起：
+    # **2 (位移) + 1 (距离) = 3 个特征**
+
+    # 因此，每一条边都会被表示为一个长度为 3 的向量 `[∆x, ∆y, 距离]`。`config.yaml` 中的 `num_edge_features: 3` 正是用来告诉神经网络模型的第一层（输入层）：准备接收维度为 3 的边特征数据。
     @staticmethod
     def add_edge_features(graph, pos):
         """
@@ -357,6 +472,19 @@ class VortexSheddingDataset(Dataset):
         denormalized_invar = invar * std + mu
         return denormalized_invar
 
+    # ### 1. `_one_hot_encode(node_type)` 详解
+    # 这个函数的作用是将原始的、用整数表示的“节点物理类型”，转换为机器学习模型更容易处理的**独热编码（One-Hot Encoding）**向量。
+
+    # 逐行解析：
+    # * **`node_type = torch.squeeze(node_type, dim=-1)`**：去除最后一个多余的维度。比如把形状为 `[节点数, 1]` 的张量变成 `[节点数]`。
+    # * **`node_type = torch.where(...)`**：这是一个重映射（Remapping）操作。
+    #     * 在 DeepMind 开源的流体数据集中，节点类型（Node Type）通常是这样定义的整数：0 表示普通流体节点，而边界节点可能是 4（入口）、5（出口）、6（墙壁）。
+    #     * 这段代码的逻辑是：如果节点类型是 0，保持为 0；如果不是 0，则减去 3。
+    #     * **结果**：原本的类型 `[0, 4, 5, 6]` 被压缩映射成了 `[0, 1, 2, 3]`。
+    # * **`node_type = F.one_hot(node_type.long(), num_classes=4)`**：
+    #     * 将上面映射好的 `[0, 1, 2, 3]` 转换为长度为 4 的独热向量。
+    #     * 0 变成 `[1, 0, 0, 0]`，1 变成 `[0, 1, 0, 0]`，以此类推。
+    #     * **核心结论：经过这一步，每一个节点都被赋予了一个维度为 4 的类型特征向量。**
     @staticmethod
     def _one_hot_encode(node_type):  # TODO generalize
         node_type = torch.squeeze(node_type, dim=-1)
