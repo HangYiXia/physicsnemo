@@ -1,402 +1,444 @@
-# AMR-M4GN：面向圆柱绕流的混合 GNN-Transformer 自适应网格架构
+# AMR-M4GN：结合空间划分与多尺度 Transformer 的大规模流体仿真代理模型
 
-## 研究工作汇报文档
+## 研究设计文档（开题对应版）
 
-**作者**：储润东  
-**日期**：2026年5月14日  
-**仓库**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`  
-**Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
+**作者**：储润东（124037910068）
+**日期**：2026年5月14日（修订）
+**仓库**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
+**主线 Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
+**对比 Baseline**：MGN、X-MeshGraphNet (X-MGN)、M4GN、节点级 Graph-Transformer
+
+> **一句话定位**：在非结构三角网格上，用「局部 GNN（短程、高频物理）+ 段级 Transformer（全局、长程压力耦合）+ 物理驱动的自适应 Token 化（AMR）」三者融合的混合架构，在几乎不增加计算量的前提下解决 MeshGraphNet 的长程依赖丢失与过平滑问题，并为大规模湍流（EAGLE）提供可扩展路径。
 
 ---
 
 ## 一、研究背景与问题
 
-### 1.1 现有方法的局限性
+### 1.1 从 CNN 到 GNN 再到 Transformer 的演进
 
-当前使用 MeshGraphNet (MGN) 进行圆柱绕流 (Vortex Shedding) 仿真代理建模时，存在以下核心问题：
+现代图形学与物理引擎对流体仿真的视觉保真度要求极高，逼真的水花、激波、湍流细节往往需要**数百万甚至上亿**级别的网格或粒子。传统数值方法在面对**大规模、高雷诺数**湍流时陷入「精度-成本」的零和博弈：细节要求提升时，计算复杂度指数级爆炸，单帧离线解算可能耗时数小时甚至数天。
 
-1. **长程依赖捕捉不足**：MGN 依赖消息传递 (Message Passing) 逐步扩展感受野，15步消息传递最远只能覆盖15跳邻居。对于圆柱绕流中压力波的全局传播（尤其是上游压力变化对下游尾迹的影响），需要大量消息传递步才能建立远距离联系。
+深度学习代理模型的演进路线：
 
-2. **计算效率与精度的矛盾**：增加消息传递步数虽然能扩大感受野，但会带来：
-   - 过平滑 (over-smoothing)：深层节点嵌入趋于一致，丧失局部细节
-   - 计算代价线性增长：O(L * E * d^2)
-   - 梯度消失/爆炸风险
-
-3. **缺乏自适应性**：MGN 对所有区域一视同仁——来流均匀区域和尾迹涡街区域投入相同计算量，造成资源浪费。
-
-### 1.2 两篇关键参考文献
-
-#### 参考文献 1：AMR-Transformer (CVPR 2025)
-
-- **论文**：Xu et al., "AMR-Transformer: Enabling Efficient Long-range Interaction for Complex Neural Fluid Simulation"
-- **核心思想**：将自适应网格细化 (AMR) 作为 Tokenizer，基于 Navier-Stokes 物理量（速度梯度、涡量、动量、KH不稳定性）决定哪些区域需要细分保留、哪些区域可以合并粗化。合并后用 Transformer 的全局自注意力高效建模长程依赖。
-- **关键贡献**：
-  - Token 数量减少 2~10 倍，FLOPs 减少最高 60 倍（因为 self-attention 是 O(N^2)）
-  - 在 CFDBench 上精度提升一个量级
-- **局限**：仅适用于结构化网格 (H x W x c)，不能直接用于非结构三角网格
-
-#### 参考文献 2：M4GN (TMLR 2025)
-
-- **论文**：Lei et al., "M4GN: Mesh-based Multi-segment Hierarchical Graph Network for Dynamic Simulations"
-- **核心思想**：三层层次化架构——Micro-level (局部 GNN 消息传递) + Intermediate-level (混合网格分区) + Macro-level (Segment Transformer 全局交互)
-- **关键贡献**：
-  - 混合分区策略：METIS 粗分 + SLIC 精修（基于模态分解特征），保证分区连通性、几何保真度、物理一致性
-  - 置换不变聚合器替代 EAGLE 的 GRU，O(Nd) vs O(Nd^2)
-  - 精度提升 56%，推理加速 22%
-- **局限**：Segment 数量固定，不能根据物理状态动态调整
-
-### 1.3 本工作的创新点
-
-**核心思路**：将 M4GN 的层次化架构骨架 + AMR-Transformer 的物理感知自适应 token 化 + 15步深度 GNN 融合为一个统一框架。
-
-**创新点总结**：
-
-| 对比维度 | M4GN | AMR-Transformer | 本工作 (AMR-M4GN) |
+| 阶段 | 代表方法 | 能力 | 根本局限 |
 | --- | --- | --- | --- |
-| 数据类型 | 非结构网格 | 结构化网格 | 非结构网格 |
-| Segment/Token 数 | 固定 K | 动态（四叉树） | 动态（AMR 决策） |
-| 物理先验 | 模态分解（静态） | N-S 物理量（动态） | 模态分解 + N-S 量 |
-| 局部建模 | 7步 GNN | 无 | 15步 GNN |
-| 全局建模 | 固定 K 个 token Transformer | 变长 token Transformer | 变长 token Transformer |
-| 自适应性 | 无 | 有 | 有 |
+| CNN | UNet 风格 | 规则笛卡尔网格上加速 | 只能处理规则网格；复杂边界需「体素化/插值」，引入巨大数值误差，丢失几何边缘与碰撞细节 |
+| GNN | MeshGraphNet (DeepMind 2020) | 直接处理非结构网格与粒子，完美贴合任意几何边界 | 消息传递逐跳扩展感受野，长程依赖需极深网络；过平滑 |
+| 多尺度 GNN | X-MeshGraphNet (NVIDIA 2024) | METIS 分区 + Halo + 梯度聚合，突破显存墙；多尺度图扩大感受野 | **只优化了长程交互的「开销」，并未真正解决长程消息传递问题** |
+| Transformer | EAGLE (ICLR 2023)、AMR-Transformer (CVPR 2025) | 自注意力全局感受野，一跳建立长程联系 | 节点级注意力 O(N²) 显存/算力爆炸 |
+
+### 1.2 MeshGraphNet 的核心机制与瓶颈
+
+MGN 采用 **Encoder–Processor–Decoder (EPD)** 结构：
+
+- **Encoder**：物理量编码为高维特征（如 128 维）。节点特征 = 速度 (u, v) + 节点类型 one-hot；边特征 = 相对坐标 (dx, dy) + 距离 ‖d‖。
+- **Processor**：L 步消息传递。L 层意味着每个节点只能聚合其 **L 跳（L-hops）** 邻居信息。
+- **Decoder**：将状态解码回物理量增量。
+
+**三大瓶颈**（与开题 PPT「研究意义及目标」一致）：
+
+1. **长程特征丢失**：`processor_size=15` 时最远只覆盖 15 跳邻居。圆柱绕流中压力波的全局传播（上游压力变化对下游尾迹的影响）、湍流中的涡-涡远程相互作用，需要远超 15 步的传递。**对压力场这类「全局瞬时更新」的物理量尤其致命**——在水体仿真中某处压力突然增大时，远距离水体若毫无响应即为物理错误。
+2. **过平滑 (over-smoothing)**：每步消息传递通常做聚合（如 sum/mean），等价于一次低通滤波。远程物理量互相影响需极深网络，不仅计算昂贵（O(L·E·d²)），还会使深层节点嵌入趋于同质化，丧失局部高频细节。
+3. **缺乏自适应性**：MGN 对所有区域一视同仁——来流均匀区与尾迹涡街区投入相同计算量，造成资源浪费。
+
+### 1.3 X-MeshGraphNet 的贡献与未竟之处（定位为对比 Baseline）
+
+X-MGN 针对 MGN 的**可扩展性**做了三点优化：
+
+1. **图分区 + Halo + 梯度聚合**：用 METIS 把大图切成含 Halo（光环）重叠区的子图，Halo 厚度 = 消息传递层数，配合梯度聚合，使「分块训练」在数学上**严格等价于**整图一次性处理，从而突破单卡显存墙（解决网格尺寸增大带来的二次方显存开销）。
+2. **免网格推理**：直接从 STL 几何生成点云图（k-NN 连边），消除推理时高质量网格生成的速度瓶颈。
+3. **多尺度图生成**：迭代组合粗/细分辨率点云，每层是上一层超集，无需复杂上/下采样层即可高效长程传播。
+
+**但 X-MGN 的本质仍是 GNN 消息传递**：它优化了长程交互的「显存开销」，却**没有改变长程信息逐跳传递、必然产生「延迟」的事实**。对压力场这种全局耦合量依旧会产生误差。本工作因此把 X-MGN 列为**对比 Baseline**，而非架构基座——我们用 Transformer 的全局自注意力**从机理上**解决长程交互。
+
+### 1.4 本工作要解决的核心问题
+
+> 如何在**非结构三角网格**上，既保留 GNN 对局部高频物理（黏性、局部涡、对流）的精确建模能力，又获得 Transformer 的全局感受野来建模长程压力耦合，同时把 Transformer 的 O(N²) 复杂度压到可接受范围？
 
 ---
 
-## 二、方法设计
+## 二、关键参考文献与启发
 
-### 2.1 总体架构
+### 2.1 M4GN (TMLR 2025)：层次化分区骨架
+
+- **论文**：Lei et al., "M4GN: Mesh-based Multi-segment Hierarchical Graph Network for Dynamic Simulations."
+- **三层架构**：Micro-level（局部 GNN 消息传递）+ Intermediate-level（混合网格分区，离线）+ Macro-level（Segment Transformer 段级全局交互）。
+- **关键贡献**：
+  - **混合分区**：METIS 粗分（保证连通性、最小化边切割、速度快）+ SLIC 超像素精修（基于模态分解特征，保证几何保真与物理一致）。Table 1 论证其在 Heuristic / Contiguity / Geometric Fidelity / Physics-Aware 四项全面优于 learnable pooling、spatial proximity pooling、Bi-Stride、same-size k-means。
+  - **置换不变聚合器**：用 average-pool + MLP 替代 EAGLE 的 GRU，复杂度从 O(Nd²) 降到 O(Nd)，且无顺序敏感、无长序列信息稀释、无梯度消失。
+  - **段级 Transformer**：在 K 个段（K≪N）上做全连接自注意力，O(K²)≪O(N²)。
+  - **位置编码**：段级 RWSE（随机游走结构编码）+ 节点级绝对 PE（注入 Encoder 输入）。
+  - **重叠分区 δ=1**：允许段间重叠一圈邻居，平滑段边界、减少不连续（消融见其 Table 9）。
+- **默认配置**：Micro-level 7 步消息传递；Segment Transformer 4 层 8 头。精度提升最高 56%，推理加速最高 22%。
+- **局限**：Segment 数量 K **固定**，不能根据物理状态动态调整——平静区与活跃区分到同等数量的段，仍有冗余。
+
+### 2.2 AMR-Transformer (CVPR 2025)：物理驱动的动态 Token 化
+
+- **论文**：Xu et al., "AMR-Transformer: Enabling Efficient Long-range Interaction for Complex Neural Fluid Simulation."
+- **核心思想**：用**自适应网格细化 (AMR)** 作为 Tokenizer——基于多叉树（2D 四叉树/3D 八叉树），自顶向下逐层 (depth) 细分；用 **Navier-Stokes 约束感知的快速剪枝模块**决定哪些区域细分保留、哪些合并粗化；合并后用 Encoder-only Transformer 做全局自注意力。
+- **四个物理判据**（逐 cell 计算）：速度梯度 G、涡量 ω、动量 M、Kelvin-Helmholtz 剪切 S。
+- **阈值采样**：训练时阈值因子 `t = {tG, tω, tM, tS}` 在预定义区间均匀随机采样；测试时手动固定以平衡精度/效率。速度梯度额外用 **Top-r 百分位**机制（取当前 depth 分布的前 r 分位触发细分）。
+- **虚拟步外推**：用前向欧拉 `u'_{t+Δt} = u_t + (u_t − u_{t−Δt})` 估计虚拟速度场，与当前场**并集**决定细分区域，提前细化「即将变活跃」的区域。
+- **损失**：NMSE（归一化均方误差），保证不同物理量尺度一致；标签也经 AMR Tokenizer 处理为多尺度表示。
+- **效果**：Token 数减少 2~10 倍，因 self-attention O(N²)，FLOPs 最高减少 60 倍；CFDBench 上精度提升一个量级。
+- **局限**：仅适用于**结构化网格** (H×W×c) 的四叉树，不能直接用于非结构三角网格。
+
+### 2.3 EAGLE (ICLR 2023)：大规模湍流数据集与 Mesh Transformer
+
+- **论文**：Janny et al., "EAGLE: Large-scale Learning of Turbulent Fluid Dynamics with Mesh Transformers."
+- **数据集**：~110 万个 2D 非结构网格快照，600 个不同场景，3 种类型；由移动气流源（2D 无人机）与非线性场景结构交互产生高度湍流、非周期涡。**作为本工作大规模扩展验证的目标数据集**。
+- **模型**：节点聚类 + 图池化 + 全局注意力，用 GRU 聚合段特征（M4GN 正是用置换不变 pooling 改进了它）。
+
+### 2.4 三者关系与本工作的融合点
 
 ```
-                          OFFLINE（每个 case 一次性预处理）
-  ┌─────────────────────────────────────────────────────────────────┐
-  │  ① Laplacian Eigenfunctions (m=6 modes)                         │
-  │  ② METIS 粗分 (64 segments) + SLIC 精修 → L0                    │
-  │  ③ 递归 METIS 在每个 L0 段内切4块 → L1 (256 segments)           │
-  │  ④ RWSE 位置编码（两层各自计算）                                  │
-  │  ⑤ 写盘缓存 partitions.pt                                       │
-  └─────────────────────────────────────────────────────────────────┘
+   MGN (局部精确, 长程弱)        X-MGN (可扩展, 长程仍弱)  ← 对比 Baseline
+            │                              │
+            └──────────── 局部建模骨架 ─────┘
+                          │
+   M4GN (层次化分区 + 段级Transformer, 段数固定)  ← 分区骨架 + 段级全局交互
+                          │
+   AMR-Transformer (物理驱动动态Token, 仅结构化网格)  ← 动态自适应 Token 化
+                          │
+                          ▼
+            AMR-M4GN（本工作）：非结构网格 + 动态层次 Token + GNN/Transformer 互补
+```
+
+---
+
+## 三、本工作创新点
+
+**核心思路**：把 M4GN 的「层次化分区骨架」+ AMR-Transformer 的「物理感知动态 Token 化」+ MGN 的「15 步深度局部 GNN」融合为统一框架，并将 AMR-Transformer 受限于结构化四叉树的思想**迁移到非结构三角网格的层次 METIS 分区树**上。
+
+| 对比维度 | MGN | X-MGN | M4GN | AMR-Transformer | **本工作 (AMR-M4GN)** |
+| --- | --- | --- | --- | --- | --- |
+| 数据类型 | 非结构 | 非结构/点云 | 非结构 | **结构化** | **非结构** |
+| 长程机制 | 逐跳消息传递 | 逐跳+多尺度图 | 段级 Transformer | 全局 Transformer | 段级 Transformer |
+| Token/Segment 数 | — | — | **固定 K** | 动态（四叉树） | **动态（层次 AMR 决策）** |
+| 物理先验 | 无 | 无 | 模态分解（静态） | N-S 物理量（动态） | **模态分解 + N-S 量（静+动）** |
+| 局部建模深度 | 15 步 GNN | 15 步 GNN | 7 步 GNN | 无 | **15 步 GNN** |
+| 自适应性 | 无 | 无 | 无 | 有 | **有** |
+
+**创新点提炼**（对齐 PPT「创新点」页）：
+
+1. **方法**：提出一种「物理驱动」的 Token 剪枝机制，利用流体力学先验（涡量阈值等）决定计算资源分配，提升效率与可解释性——首次将 AMR-Transformer 的动态剪枝**搬到非结构网格的层次分区树**上。
+2. **架构**：融合 GNN 的局部灵活性与 Transformer 的全局感受野，用动态 Token 聚合（而非固定 K）解决大规模扩展性难题。
+3. **应用**：无需重新生成网格，而是通过神经网络内部的 Token **动态聚合模拟网格自适应过程**，为实时流体仿真提供新思路。
+
+---
+
+## 四、方法设计
+
+### 4.1 总体架构
+
+整个流程分为**离线预处理**（每个 case 几何固定，只算一次）与**在线前向**（每个时间步执行）两段：
+
+```
+                          OFFLINE（每个 case 一次性预处理，写盘缓存）
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  ① Laplacian Eigenfunctions (m=6 modes, cotangent FEM, Neumann BC)  │
+  │  ② 障碍物有符号距离 f_obs（到圆柱壁面）                              │
+  │  ③ METIS 粗分 (K0=64) + SLIC 精修 → L0                              │
+  │  ④ 递归 METIS：每个 L0 段内切 4 块 → L1 (K1≈256)                    │
+  │  ⑤ 段重叠 δ=1：每段并入一圈邻居（平滑段边界）                       │
+  │  ⑥ RWSE 段级位置编码（L0/L1 各算一份，16 步随机游走）               │
+  │  ⑦ 节点级绝对位置编码（注入 Encoder 输入）                          │
+  │  ⑧ 写盘缓存 partition_cache.pt                                      │
+  └────────────────────────────────────────────────────────────────────┘
 
                           ONLINE（每个时间步的前向传播）
-  ┌─────────────────────────────────────────────────────────────────┐
-  │                                                                  │
-  │  graph_t  ─► ① Micro-level GNN (15步 MGN)  ─► h_node [N, d]    │
-  │                                                                  │
-  │            ─► ② 物理量计算 (G, omega, M, S) ─► phys [N, 4]      │
-  │                                                                  │
-  │            ─► ③ AMR Router: L1 聚合 phys →                       │
-  │                   活跃段保持细分 (L1)                             │
-  │                   平静段折回粗层 (L0)                             │
-  │                   → 变长 token 数 T (64 <= T <= 256)             │
-  │                                                                  │
-  │            ─► ④ Segment Encoding:                                │
-  │                   mean-pool h_node per token                     │
-  │                   + RWSE PE + (depth, x_mean, y_mean) PE         │
-  │                   → h_seg [T, d]                                 │
-  │                                                                  │
-  │            ─► ⑤ Macro Transformer (4层 x 8头):                   │
-  │                   全局自注意力 → h_seg' [T, d]                    │
-  │                                                                  │
-  │            ─► ⑥ Feature Dispatch:                                │
-  │                   h_seg' scatter back → h_global [N, d]          │
-  │                   拼接 h_cat = [h_node, h_global]                │
-  │                                                                  │
-  │            ─► ⑦ Decoder MLP → (du, dv, p_hat) [N, 3]            │
-  │                                                                  │
-  └─────────────────────────────────────────────────────────────────┘
+  ┌────────────────────────────────────────────────────────────────────┐
+  │  graph_t ─► ① Micro GNN (15步 MGN, EPD去掉decoder) ─► h_node [N,d]  │
+  │                                                                      │
+  │          ─► ② 物理量算子 (G, ω, M, S, 含虚拟步外推) ─► phys [N,4]   │
+  │                                                                      │
+  │          ─► ③ AMR Router：在 L1 上聚合 phys，                       │
+  │                 活跃段保持 L1 细粒度；平静段折回 L0 父段；           │
+  │                 → 变长 token 数 T (64 ≤ T ≤ 256)                    │
+  │                                                                      │
+  │          ─► ④ Segment Encoding：                                    │
+  │                 mean-pool h_node per token + RWSE PE + (depth,x̄,ȳ)  │
+  │                 → h_seg [T, d]                                       │
+  │                                                                      │
+  │          ─► ⑤ Macro Transformer (4层×8头, Pre-LN):                  │
+  │                 段级全局自注意力 → h_seg' [T, d]                     │
+  │                                                                      │
+  │          ─► ⑥ Feature Dispatch：                                    │
+  │                 h_seg' scatter 回节点 → h_global [N, d]              │
+  │                 拼接 h_cat = [h_node, h_global] [N, 2d]              │
+  │                                                                      │
+  │          ─► ⑦ Decoder MLP → (Δu, Δv, p̂) [N, 3]                    │
+  └────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 各模块详细说明
+**数学符号约定**：图 G=(V,E)，N=|V| 节点，E=|E| 边；隐藏维 d=128。分区策略 π(G)=fs(G,I) 输出段集合 {S₁,…,S_K}，I 为先验物理信息（边界条件、障碍）。重叠量 δ∈ℕ，δ=0 无重叠，δ=1 时 V^δ_{S_k}=V^{δ−1}_{S_k}∪{Adj(i)|i∈V^{δ−1}_{S_k}}。
 
-#### 2.2.1 模态分解 (Modal Decomposition)
+### 4.2 模态分解 (Modal Decomposition)
 
-**目的**：提取网格上的几何-物理结构特征，用于指导分区算法产出"物理一致"的 segment。
+**目的**：提取网格的几何-物理结构特征，指导分区算法产出「物理一致」的段。
 
-**方法**：对流体问题，采用 Laplacian Eigenfunctions（M4GN 的流体路径）：
-
-```
-解 -nabla^2 phi = lambda phi
-取最小的 m=6 个特征值对应的特征向量
-每个节点 i 获得特征 f_md(i) = (phi_1(i), phi_2(i), ..., phi_6(i))
-```
-
-**物理意义**：
-- 低频模态捕捉大尺度流动结构（如来流方向）
-- 中频模态反映圆柱附近的流动分离和回流区
-- 模态特征相近的节点倾向于有相似的动力学行为
-
-**在圆柱绕流中的预期效果**：
-- 圆柱正前方（驻点区）和两侧（加速区）模态值差异明显 → 被分到不同 segment
-- 尾迹区域内部模态相似 → 被分为一组
-- 边界层节点因靠近壁面，模态受 Dirichlet 约束 → 自动与远场分离
-
-#### 2.2.2 混合网格分区 (Hybrid Segmentation)
-
-**两阶段流程**：
-
-**Stage 1：METIS 粗分**
-- 输入：网格图 G = (V, E)
-- 输出：K=64 个大致等尺寸的连通子图
-- 优势：保证连通性、最小化跨 segment 的边切割
-
-**Stage 2：SLIC 精修**
-- 基于物理感知特征的 K-means 变体
-- 距离度量：
+**方法**（M4GN 流体路径，Laplacian Eigenfunctions）：求解
 
 ```
-d(i, C_k) = ||f_md_i - f_md_Ck|| + ||f_obs_i - f_obs_Ck|| + tau * ||x_i - x_Ck||
+−∇²φ = λφ,  subject to boundary constraints
+取最小的 m=6 个非零特征值对应特征向量
+节点 i 的特征 f_md(i) = (φ₁(i), …, φ₆(i))
 ```
 
-其中：
-- `f_md`：模态分解特征（6维）
-- `f_obs`：节点到圆柱表面的有符号距离（1维）
-- `x`：节点空间坐标（2维）
-- `tau=1.0`：紧凑性参数（控制空间接近度的权重）
+**离散实现要点**（已在 `modal_decomp.py` 落地）：
+- 两种 Laplacian：`graph_laplacian`（L=D−A，任意图）与 `cotangent_laplacian`（FEM 余切权重，对 −∇² 的一致离散，物理意义更好，**默认**）。
+- 边界条件：`neumann`（默认，全域求解，跳过常数零模）或 `dirichlet`（固定边界为 0，仅内部求解后 scatter 回全域）。
+- 鲁棒性：`scipy.sparse.linalg.eigsh` 用 shift-invert (sigma=0) 加速小特征值收敛；异常 fallback 宽松容差；每模归一化到单位范数。
 
-**递归构建二层树**：
+**物理意义**：低频模捕捉大尺度流动结构（来流方向）；中频模反映圆柱附近分离与回流；模态相近的节点动力学行为相似。圆柱驻点区/加速区/尾迹区会因模态值差异被分到不同段，边界层节点因近壁约束自动与远场分离。
+
+### 4.3 混合网格分区 (Hybrid Segmentation)
+
+**Stage 1 — METIS 粗分**：输入网格图 G，输出 K0=64 个大致等尺寸的**连通**子图；保证连通性、最小化跨段边切割；优先 `pymetis`，无则 fallback 到谱聚类（eigsh+KMeans，会告警建议装 pymetis）。
+
+**Stage 2 — SLIC 精修**（M4GN Algorithm 2）：基于物理感知特征的 K-means 变体，距离度量
+
 ```
-Level 0 (粗): 64 segments  ← METIS+SLIC
-Level 1 (细): 256 segments ← 对每个 L0 segment 内部再 METIS 切 4 块
+d(i, C_k) = ‖f_obs_i − f_obs_Ck‖ + ‖f_md_i − f_md_Ck‖ + τ·‖x_i − x_Ck‖
 ```
 
-每个节点最终携带两个分配 ID：`L0_assign[i]` 和 `L1_assign[i]`。
+- `f_obs`：节点到圆柱壁面的有符号距离（1 维，自动检测 node_type 壁面节点）。
+- `f_md`：模态特征（6 维）；`x`：空间坐标（2 维）；`τ=1.0` 控制紧凑性。
+- 特征与坐标均做 [0,1] 归一化，保证 τ 物理含义一致。
+- **连通性约束**：节点只能重分配到「邻居所属」的段，避免跨空隙连接（修正 same-size k-means 的缺陷）。
 
-#### 2.2.3 RWSE 位置编码
+**递归二层树 + 重叠**：
 
-**全称**：Random Walk Structural Encoding
+```
+Level 0 (粗): K0=64  segments  ← METIS+SLIC（全图）
+Level 1 (细): K1≈256 segments  ← 每个 L0 段内部再 METIS 切 4 块
+重叠 δ=1: 每段并入一圈邻居 → 平滑段边界、减少 Feature Dispatch 处的不连续
+```
 
-**目的**：让 Transformer 知道 segment 之间的拓扑相邻关系，而不仅仅是空间坐标。
+每节点携带两个分配 ID：`L0_assign[i]`、`L1_assign[i]`；并返回段级邻接矩阵供 RWSE 与可视化使用。过小的段（< 4 节点）不再细分。
 
-**计算方法**：
-1. 对每一层 (L0, L1) 构建 segment 级别的邻接矩阵 A_K
-   - 如果两个 segment 之间有跨 segment 的边 → 相邻
-2. 归一化得到随机游走转移矩阵 P = D^{-1} A_K
-3. 计算 P, P^2, P^3, ..., P^16 的对角线元素 → 16维向量
+### 4.4 位置编码（段级 RWSE + 节点级绝对 PE）
 
-**物理意义**：RWSE(k) 的第 j 维代表"从 segment k 出发、走 j 步后回到自身的概率"。这编码了 segment 在拓扑图中的局部连通结构。
+**段级 RWSE（Random Walk Structural Encoding）**：
+1. 对每层构建段级邻接 A_K：`A_K[Si,Sj] = Σ_{m∈Si}Σ_{n∈Sj} A_{mn}`（两段间有跨段边即相邻）。
+2. 归一化转移矩阵 P = D⁻¹A_K，计算 diag(P), diag(P²), …, diag(P¹⁶) → 16 维向量。
+3. 第 j 维 = 「从段 k 出发走 j 步回到自身的概率」，编码段在拓扑图中的局部连通结构。
 
-#### 2.2.4 Micro-level GNN（15步消息传递）
+**节点级绝对 PE**（M4GN §3.3.1）：用 MLP `fnp` 处理每节点 PE，**注入 Encoder 输入**：`h⁰_i = fn(x_i + fnp(p_i))`，参与微观消息传递，提升所提段特征的连续性。
 
-**架构**：直接复用 PhysicsNeMo 的 `MeshGraphNet`，设置 `processor_size=15`。
+### 4.5 Micro-level GNN（15 步消息传递）
 
-**分工**：
-- 负责捕捉局部物理：边界层内的黏性扩散、局部涡结构的旋转、对流项
-- 15 步消息传递让每个节点能"看到" 15 跳邻居（约覆盖圆柱直径的 2-3 倍范围）
+**架构**：直接复用 PhysicsNeMo 的 `MeshGraphNet`，但**去掉其 decoder 头**——decoder 推迟到 Macro 层之后（M4GN EPD 拆分思想）。即只取 `node_encoder + edge_encoder + processor` 的输出 `h_node [N, d]`。
 
-**与后续 Transformer 的互补关系**：
-- GNN：精确的局部物理（高频、短程）
-- Transformer：全局压力场（低频、长程）
+**分工**：负责局部物理——边界层黏性扩散、局部涡旋转、对流项。15 步消息传递使每节点「看到」15 跳邻居（约覆盖圆柱直径 2~3 倍范围）。与 Transformer 互补：GNN 管高频/短程，Transformer 管低频/长程。
 
-**实现细节**：
+**噪声注入训练**（Godwin et al. 2021，M4GN §3.2 沿用）：训练时对输入图加噪声并加入「噪声纠正」的节点级损失，提升长时 rollout 稳定性。
+
+**实现要点**：
+
 ```python
 self.micro = MeshGraphNet(
-    input_dim_nodes=6,    # u, v + 4-dim node_type one-hot
+    input_dim_nodes=6,    # u, v + node_type one-hot(4)
     input_dim_edges=3,    # relative_x, relative_y, distance
-    output_dim=128,       # hidden dim d
-    processor_size=15,    # 15步消息传递
-    mlp_activation_fn='silu',
-    recompute_activation=True,  # 节省显存
+    output_dim=128,       # 隐藏维 d；注意：实际取 processor 输出，旁路 decoder
+    processor_size=15,    # 15 步消息传递
+    aggregation="sum",
+    recompute_activation=True,   # 省显存
 )
+# forward 内部：edge_enc → node_enc → processor → (本工作旁路 node_decoder)
 ```
 
-#### 2.2.5 N-S 约束感知物理量计算
+> **落地注意**：`MeshGraphNet.forward` 默认返回经 decoder 的结果。本工作需直接调用其内部 `processor` 输出 `h_node`，或将 `output_dim` 设为 d 后把 decoder 当作首个投影层、把最终物理量预测交给 §4.9 的统一 decoder。两种方式在 §九 实现计划中确定。
 
-**目的**：为 AMR Router 提供"每个区域是否需要细分"的依据。
+### 4.6 N-S 约束感知物理量算子
 
-**四个判据**（来自 AMR-Transformer 论文）：
+**目的**：为 AMR Router 提供「每个区域是否需细分」的依据。四个判据（AMR-Transformer §3.2）：
 
-| 物理量 | 公式 | 物理含义 | 在圆柱绕流中的表现 |
+| 物理量 | 公式 | 物理含义 | 圆柱绕流表现 |
 | --- | --- | --- | --- |
-| 速度梯度 G | sqrt(\|\|nabla u\|\|^2 + \|\|nabla v\|\|^2) | 检测急剧速度变化/间断 | 圆柱壁面附近极高 |
-| 涡量 omega | dv/dx - du/dy | 流体旋转强度 | 脱落涡处极高 |
-| 动量 M | rho * sqrt(u^2+v^2) * area | 局部动量大小 | 加速区域高 |
-| KH 剪切 S | du/dy + dv/dx | 剪切层不稳定性 | 尾迹两侧剪切层高 |
+| 速度梯度 G | √(‖∇u‖² + ‖∇v‖²) | 急剧速度变化/间断 | 壁面附近极高 |
+| 涡量 ω | ∂v/∂x − ∂u/∂y | 旋转强度 | 脱落涡处极高 |
+| 动量 M | ρ·√(u²+v²)·area | 局部动量 | 加速区高 |
+| KH 剪切 S | ∂u/∂y − ∂v/∂x | 剪切层不稳定 | 尾迹两侧剪切层高 |
 
-**图上离散实现**：在非结构三角网格上，用 1-ring 邻居做最小二乘梯度估计：
-```
-对节点 i，收集所有邻居 j：
-  delta_x = pos_j - pos_i    形状 [deg(i), 2]
-  delta_u = u_j - u_i        形状 [deg(i), 1]
-求解最小二乘：grad_u_i = (delta_x^T delta_x)^{-1} delta_x^T delta_u
-```
-
-#### 2.2.6 AMR Router（自适应 Token 路由）
-
-**核心逻辑**：二层（L0=64, L1=256）的"保留 vs 合并"决策。
+**非结构网格离散**（1-ring 最小二乘梯度，避免结构网格四叉树的限制）：
 
 ```
-输入：partition_levels = [L0_assign, L1_assign]
-      phys_per_node = {G, omega, M, S}
+对节点 i，收集邻居 j：
+  Δx = pos_j − pos_i      [deg(i), 2]
+  Δu = u_j − u_i          [deg(i), 1]
+最小二乘：∇u_i = (ΔxᵀΔx)⁻¹ Δxᵀ Δu     （∇v_i 同理）
+```
 
-Step 1: 在 L1 (细层 256 个 segment) 上聚合物理量
-        对每个 segment 取 max(abs(phys)) → agg_G[k], agg_omega[k], ...
+**虚拟步外推**（AMR-Transformer Eq.11）：用前向欧拉 `u'_{t+Δt}=u_t+(u_t−u_{t−Δt})` 估计虚拟速度场，对 `u_t` 与 `u'_{t+Δt}` 各算一遍物理量，**取并集**触发细分，提前细化「即将变活跃」的区域，提升 rollout 时的前瞻性。
 
-Step 2: 判断每个 L1 segment 是否"活跃"
-        is_active[k] = (agg_G[k] > T_G) OR (agg_omega[k] > T_omega)
-                        OR (agg_M[k] > T_M) OR (agg_S[k] > T_S)
+### 4.7 AMR Router（自适应 Token 路由）
 
-Step 3: 分配最终 token
-        活跃的 L1 segment → 保持为独立 token（细粒度）
-        平静的 L1 segment → 折回 L0 parent（几个兄弟合并为 1 个 token）
+**核心逻辑**：把 AMR-Transformer 的「四叉树逐层细分」迁移为「层次 METIS 树（L0=64↔L1=256）的保留 vs 折回」决策。L1≈对应四叉树更深一层（细），L0≈更浅一层（粗）。
 
-输出：变长 token 数 T (64 <= T <= 256)
+```
+输入：partition_levels=[L0_assign, L1_assign]，phys_per_node={G,ω,M,S}，阈值 T（采样）
+
+Step 1  在 L1（256 段）聚合物理量：每段取 max|phys| → agg_G[k], agg_ω[k], …
+Step 2  活跃判定（满足任一即活跃）：
+        is_active[k] = (agg_G[k] > T_G) ∨ (agg_ω[k] > T_ω)
+                       ∨ (agg_M[k] > T_M) ∨ (agg_S[k] > T_S)
+        速度梯度 G 额外支持 Top-r 百分位触发（取当前层分布前 r 分位）
+Step 3  分配最终 token：
+        活跃 L1 段 → 保持独立 token（细粒度）
+        平静 L1 段 → 折回 L0 父段（兄弟合并为 1 token）
+输出：变长 token 数 T（64 ≤ T ≤ 256），kept_assign[N], kept_depth[N]
 ```
 
 **阈值采样机制**（AMR-Transformer 的巧妙设计）：
-- **训练时**：阈值从预定义区间均匀随机采样
-  - G: [0.1, 2.0], omega: [0.2, 4.0], M: [0.5, 10.0], S: [0.2, 4.0]
-- **测试时**：使用固定阈值（手动调节，平衡精度与效率）
-- **好处**：模型对不同粒度的 token 化都见过，泛化性强
+- **训练时**：阈值在预定义区间均匀随机采样——`G:[0.1,2.0], ω:[0.2,4.0], M:[0.5,10.0], S:[0.2,4.0]`。模型见过各种粒度的 Token 化，泛化性强。
+- **测试时**：固定阈值，手动调节平衡精度/效率。
 
-**直觉解释**：
-- 来流均匀区（涡量~0，梯度~0）→ 大块合并成一个 token → 节省计算
-- 尾迹涡街区（涡量极高、剪切极高）→ 保持 256 粒度 → 精确建模
-- 圆柱壁面区（梯度极高）→ 保持细分 → 边界层精度
+**直觉**：来流均匀区（ω≈0, G≈0）→ 大块合并省算；尾迹涡街区（ω/S 极高）→ 保持 256 粒度精确建模；壁面区（G 极高）→ 保持细分保边界层精度。
 
-#### 2.2.7 Segment Encoding + Macro Transformer
+### 4.8 Segment Encoding + Macro Transformer + Feature Dispatch
 
-**Segment Encoding（M4GN §3.3.1 风格）**：
+**Segment Encoding**（置换不变，M4GN §3.3.1）：
+
 ```python
-# 平均池化：segment k 的所有节点的 h 取均值
-h_seg_k = MLP( mean_{i in S_k} h_node_i )
-
-# 加位置编码
-h_seg_k += PE_proj([RWSE_k, depth_k, x_mean_k, y_mean_k])
+h_seg_k = MLP( mean_{i∈S_k} h_node_i )           # average pooling，O(Nd)
+h_seg_k += PE_proj([RWSE_k, depth_k, x̄_k, ȳ_k]) # 段级 PE
 ```
 
-优势（相比 EAGLE 的 GRU）：
-- 置换不变：不依赖节点顺序
-- O(Nd) vs O(Nd^2)：计算更轻
-- 无梯度消失：避免长序列信息衰减
+相比 EAGLE 的 GRU：置换不变、O(Nd) vs O(Nd²)、无梯度消失、无长序列信息稀释。
 
-**Macro Transformer**：
+**Macro Transformer**（M4GN §3.3.2，Pre-LN）：在 T 个段构成的**全连接段图**上做多头自注意力。
+
 ```
-配置：4 层 TransformerEncoder, 8 注意力头, d_model=128, FFN=512
-输入：h_seg [T, 128] + padding mask
-输出：h_seg' [T, 128]
-复杂度：O(4 * T^2 * 128)
+配置：4 层 TransformerEncoder, 8 头, d_model=128, FFN=512, Pre-LN
+输入：h_seg [T,128] + padding mask（变长 batch）
+输出：h_seg' [T,128]
+复杂度：O(L_S · T² · d)，因 T≪N 故 O(T²)≪O(N²)
 ```
 
-当 T=150 时：4 * 150^2 * 128 = 11.5M FLOPs（极低）
-当 T=256 时：4 * 256^2 * 128 = 33.6M FLOPs（仍很低）
+T=150 时 4·150²·128≈11.5 MFLOPs；T=256 时≈33.6 MFLOPs，均极低。
 
-**Feature Dispatch（M4GN §3.3.2）**：
+**Feature Dispatch**（M4GN §3.3.2）：
+
 ```python
-# 每个节点 i 找到自己所属 token 的输出
-h_global_i = h_seg'[token_of(i)]
-
-# 拼接局部+全局
-h_cat_i = Concat([h_node_i, h_global_i])   # [N, 2d=256]
+h_global_i = h_seg'[token_of(i)]              # 节点取所属 token 输出
+h_cat_i    = Concat([h_node_i, h_global_i])   # [N, 2d=256]
 ```
 
-**设计哲学**：
-- `h_node_i`（来自 15步 GNN）：保留高频局部物理细节
-- `h_global_i`（来自 Transformer）：注入全局上下文（压力传播、远程涡-涡相互作用）
-- 拼接而非相加：让 decoder 自己学习如何融合两种尺度的信息
+**设计哲学**：`h_node`（15 步 GNN）保留高频局部细节；`h_global`（Transformer）注入全局上下文（压力传播、远程涡-涡相互作用）；**拼接而非相加**，让 decoder 自学如何融合两种尺度。δ=1 重叠进一步平滑段边界处的 dispatch 不连续。
 
-#### 2.2.8 Decoder + Loss
+### 4.9 Decoder + 损失函数
 
-**Decoder**：
-```python
-self.decoder = MLP([256, 128, 3])  # 输出 (delta_u, delta_v, p_hat)
+**Decoder**：`MLP([256, 128, 3])` → (Δu, Δv, p̂)。速度预测增量（残差），压力预测绝对值。
+
+**损失**：Per-channel NMSE（与 AMR-Transformer 一致）：
+
+```
+NMSE = mean((pred − target)²) / mean(target²).clamp_min(eps)
 ```
 
-**Loss Function**：Per-channel NMSE（Normalized Mean Squared Error）
-```
-NMSE = mean((pred - target)^2) / mean(target^2).clamp_min(eps)
-```
-
-优势（vs 普通 MSE）：
-- 自动适应不同物理量的尺度差异
-- 速度增量 ~O(0.001) 和压力 ~O(1) 不会互相淹没
+优势：自动适应尺度差异——速度增量 ~O(10⁻³) 与压力 ~O(1) 不会互相淹没。可叠加噪声纠正项（§4.5）。
 
 ---
 
-## 三、与 Baseline 的对比分析
+## 五、与 Baseline 的对比分析
 
-### 3.1 计算复杂度对比
+### 5.1 计算复杂度对比
 
-圆柱绕流数据集参数：N ≈ 1900 节点，E ≈ 5500 边，d = 128
+圆柱绕流主线参数：N≈1900 节点，E≈5500 边，d=128。
 
-| 模型 | 主要计算项 | 估算 FLOPs | 备注 |
-| --- | --- | --- | --- |
-| MGN (15步) | O(L*E*d^2) | 1.35 GFLOPs | 纯消息传递 |
-| 节点级 Transformer | O(N^2*d) | 462 MFLOPs | 但显存 14.4 GB |
-| M4GN (K=36固定) | MGN + O(K^2*d) | +0.66 MFLOPs | K 太小 |
-| **AMR-M4GN (ours)** | MGN + O(T^2*d) | +11.5 MFLOPs (T=150) | 自适应 |
+| 模型 | 主要计算项 | 估算 FLOPs | 长程机制 | 备注 |
+| --- | --- | --- | --- | --- |
+| MGN (15 步) | O(L·E·d²) | ~1.35 GFLOPs | 15 跳 | 纯消息传递，长程弱 |
+| X-MGN | O(L·E·d²)+多尺度图 | ≈MGN 量级 | 逐跳+多尺度 | 省显存但长程仍弱 |
+| 节点级 Graph-Transformer | O(N²·d) | ~462 MFLOPs | 全局 | 显存 ~14.4 GB，不可行 |
+| M4GN (K=64 固定) | MGN + O(K²·d) | +1.3 MFLOPs | 段级全局 | K 固定，活跃区粒度不足 |
+| **AMR-M4GN (ours)** | MGN + O(T²·d) | +11.5 MFLOPs (T=150) | 段级全局+自适应 | **自适应粒度** |
 
-**核心观察**：
-- Transformer 部分的开销远小于 GNN 部分（因为 T << N）
-- 总开销约为原 MGN 的 1.01 倍——几乎"免费"获得了全局建模能力
+**核心观察**：Transformer 部分开销远小于 GNN 部分（T≪N）；总开销约为原 MGN 的 **1.01 倍**——几乎「免费」获得全局建模能力。相比节点级 Transformer，AMR-M4GN 把 O(N²) 降到 O(T²)，显存与算力均可控。
 
-### 3.2 精度预期
+### 5.2 精度预期
 
-| 场景 | MGN (baseline) | AMR-M4GN (预期) | 提升原因 |
-| --- | --- | --- | --- |
-| 涡脱落频率 | 中 | 高 | Transformer 捕捉全局 Strouhal 数 |
-| 尾迹速度衰减 | 中偏低 | 高 | 远程压力-速度耦合 |
-| 回流区长度 | 中 | 高 | AMR 在分离点处保留细 token |
-| 表面压力分布 | 高 | 高 | GNN 15步已覆盖 |
-| 长时 rollout 稳定性 | 低 | 中偏高 | 全局约束减缓误差累积 |
+| 场景 | MGN (baseline) | X-MGN | AMR-M4GN (预期) | 提升原因 |
+| --- | --- | --- | --- | --- |
+| 涡脱落频率 (Strouhal) | 中 | 中 | 高 | Transformer 捕捉全局周期 |
+| 尾迹速度衰减 | 中偏低 | 中 | 高 | 远程压力-速度耦合 |
+| 回流区长度 | 中 | 中 | 高 | AMR 在分离点保留细 token |
+| 表面压力分布 | 高 | 高 | 高 | GNN 15 步已覆盖 |
+| 全局压力场瞬时响应 | 低 | 低 | 高 | **Transformer 一跳全局** |
+| 长时 rollout 稳定性 | 低 | 中 | 中偏高 | 全局约束+噪声注入减缓误差累积 |
+| 千万级网格显存峰值 | 高（线性/二次）| 低（Halo 分块）| 中 | AMR 减 token；扩展见 §十二 |
 
 ---
 
-## 四、数据集与实验设置
+## 六、数据集与实验设置
 
-### 4.1 数据集
+### 6.1 主线数据集：CylinderFlow（圆柱绕流）
 
-**VortexSheddingDataset**（PhysicsNeMo 内置）：
-- 来源：圆柱绕流直接数值仿真 (DNS)
-- 训练集：1000 个 case × 600 时间步 = 599,000 样本
-- 网格：~1900 节点的非结构三角网格（stationary，拓扑不随时间变化）
-- 节点特征：速度 (u,v) + node_type one-hot (4维)
-- 边特征：相对坐标 (dx, dy) + 距离 |d|
-- 预测目标：速度增量 (delta_u, delta_v) + 压力 p
-- Reynolds 数变化范围：通过不同圆柱直径和来流速度覆盖
+**VortexSheddingDataset**（PhysicsNeMo 内置，与现有 `train.py`/`config.yaml` 兼容）：
+- 来源：圆柱绕流直接数值仿真 (DNS)；网格 ~1900 节点的非结构三角网格（stationary，拓扑不随时间变化）。
+- 节点特征：速度 (u,v) + node_type one-hot（4 维）；边特征：相对坐标 (dx,dy) + 距离 |d|。
+- 预测目标：速度增量 (Δu,Δv) + 压力 p；Reynolds 数通过不同圆柱直径/来流速度覆盖。
+- 训练规模（对齐现有 config）：`num_training_samples` 个 case × `num_training_time_steps` 步。
 
-### 4.2 训练设置
+**选它做主线的理由**：现有 `amr_m4gn/` 代码（modal_decomp + segmentation）已基于此构建，网格小、可在单卡快速迭代，便于把全链路跑通、做完整消融，与 MGN baseline 公平对比。
+
+### 6.2 扩展数据集：EAGLE（大规模非定常湍流）
+
+- ~110 万个 2D 非结构网格快照、600 场景、3 类型；高度湍流、非周期涡，每个 mesh 节点数（数千级）远大于圆柱绕流，graph diameter 更大、长程耦合更强。
+- **作为「大规模能力验证」目标**：在主线跑通后迁移，验证混合架构在强湍流/长程场景下相对 MGN/X-MGN 的优势，并验证 AMR Token 剪枝在大网格上的算力节省。
+- 数据加载需新增 EAGLE 的 reader（区别于 TFRecord 的 cylinder_flow）。
+
+### 6.3 训练设置
 
 ```yaml
-# 优化器
-optimizer: Adam (或 Apex FusedAdam)
+optimizer: Adam（或 Apex FusedAdam）
 lr: 1e-4
-lr_decay: exponential, rate=0.999985 per step
-
-# 训练
-epochs: 200
-batch_size: 4 (图级别，每张图 ~1900 节点)
-AMP: True (FP16 混合精度)
-DDP: 支持多卡
-
-# AMR 阈值（训练时随机采样）
-G: U[0.1, 2.0]
-omega: U[0.2, 4.0]
-M: U[0.5, 10.0]
-S: U[0.2, 4.0]
+lr_decay: exponential, rate≈0.9999991 per step   # 对齐现有 config
+epochs: 25~200（先小后大）
+batch_size: 1~4（图级别）
+amp: True（FP16 混合精度，先关后开以排查数值问题）
+ddp: 支持多卡
+noise_injection: True（训练时输入加噪 + 噪声纠正损失）
+# AMR 阈值（训练随机采样）
+G:U[0.1,2.0]  ω:U[0.2,4.0]  M:U[0.5,10.0]  S:U[0.2,4.0]
+# AMR warm-up：前 5 epoch 关闭 AMR，全用 L1 细粒度（见风险表）
 ```
 
-### 4.3 评价指标
+### 6.4 评价指标（对齐 PPT「实验方案与评估指标」两页）
 
-1. **单步预测精度**：NMSE, MAE, MSE（对标 AMR-Transformer 论文 Table 1）
-2. **Rollout 精度**：50/100/200 步自回归的误差累积曲线
-3. **推理效率**：单步 FLOPs, GPU 时间, 峰值显存
-4. **AMR 统计**：平均 token 数 T、token 数分布、与物理量的相关性
+**A. 物理精度与保真度**
+1. **单步 / 多步 RMSE**：评估速度场 (u,v) 与压力场 p 的均方根误差；并报 NMSE/MAE（对标 AMR-Transformer Table 1）。
+2. **长程误差累积**：50/100/200 帧自回归 rollout 误差曲线；测算连续推演数百帧后的**能量守恒与发散**情况。
 
-### 4.4 消融实验计划
+**B. 计算效能与资源消耗**
+3. **显存峰值**：验证在更大网格（EAGLE/千万级）下是否能突破单卡显存墙（AMR 减 token 的贡献）。
+4. **单帧推理延迟**：对比传统物理求解器（如 OpenFOAM），测算加速比（期望 1~2 个数量级加速）；并报单步 FLOPs / GPU 时间。
+
+**C. 视觉效果评估**
+5. 观察湍流核心与涡旋边缘是否出现「过度平滑」，评估视觉保真度（直接对应 §1.2 的过平滑瓶颈）。
+
+**D. AMR 统计**
+6. 平均 token 数 T、T 分布、T 与物理量（涡量/梯度）的相关性，验证「物理驱动」剪枝的可解释性。
+
+### 6.5 消融实验计划
 
 | 实验 | 配置 | 验证什么 |
 | --- | --- | --- |
 | Full model | AMR-M4GN | 完整性能 |
-| w/o AMR | 固定 K=256 | AMR 的效率贡献 |
-| w/o Transformer | 只有 15步 GNN | Transformer 的精度贡献 |
+| w/o AMR | 固定 K=256 | AMR 的效率贡献（对照 M4GN 固定 K）|
+| w/o Transformer | 只有 15 步 GNN | Transformer 的精度贡献（对照 MGN）|
 | w/o Modal Decomp | METIS-only 分区 | 模态分解的分区质量贡献 |
-| w/o RWSE PE | 去掉 RWSE | 位置编码的必要性 |
-| 7步 vs 15步 GNN | processor_size=7 | 深度 GNN 的收益 |
+| w/o RWSE PE | 去掉段级 RWSE | 位置编码必要性 |
+| w/o δ=1 重叠 | δ=0 | 段重叠对段边界连续性的贡献 |
+| w/o 虚拟步 | 仅当前帧 phys | 虚拟步外推对 rollout 的贡献 |
+| 7 步 vs 15 步 GNN | processor_size=7/15 | 深度 GNN 的收益 vs 过平滑 |
 
 ---
 
-## 五、代码实现计划
+## 七、代码实现计划
 
-### 5.1 文件结构
+### 7.1 文件结构
 
 ```
 physicsnemo/examples/cfd/vortex_shedding_mgn/
@@ -407,180 +449,120 @@ physicsnemo/examples/cfd/vortex_shedding_mgn/
 │   └── config_amr_m4gn.yaml       # [新建] AMR-M4GN 配置
 ├── train_amr_m4gn.py              # [新建] AMR-M4GN 训练入口
 ├── inference_amr_m4gn.py          # [新建] 推理+评估脚本
-├── preprocess_partitions.py       # [新建] 离线预处理（模态分解+分区+RWSE）
-└── amr_m4gn/                      # [新建] 模型包
-    ├── __init__.py
-    ├── modal_decomp.py            # Laplacian eigenfunctions
-    ├── segmentation.py            # METIS + SLIC 混合分区 + 递归
-    ├── pe.py                      # RWSE 位置编码
-    ├── physics_ops.py             # 速度梯度/涡量/动量/KH剪切
-    ├── amr_router.py              # AMR 二层路由决策
-    ├── micro_gnn.py               # MeshGraphNet wrapper (15步)
-    ├── macro_transformer.py       # Segment Transformer + dispatch
-    └── model.py                   # AMRM4GN 顶层模型
+├── preprocess_partitions.py       # [新建] 离线预处理 CLI（封装下列离线步骤）
+├── visualize_partition.py         # [已有] 预处理诊断可视化
+└── amr_m4gn/                      # 模型包
+    ├── __init__.py                # [已有]
+    ├── modal_decomp.py            # [已有] Laplacian eigenfunctions
+    ├── segmentation.py            # [已有] METIS+SLIC 混合分区 + 递归 + δ重叠
+    ├── pe.py                      # [新建] RWSE + 节点级绝对 PE
+    ├── physics_ops.py             # [新建] G/ω/M/S + 1-ring 最小二乘 + 虚拟步
+    ├── amr_router.py              # [新建] AMR 二层 fold/keep 路由 + 阈值采样
+    ├── micro_gnn.py               # [新建] MeshGraphNet wrapper（旁路 decoder）
+    ├── macro_transformer.py       # [新建] Segment Encode + Transformer + Dispatch
+    └── model.py                   # [新建] AMRM4GN 顶层模型
 ```
 
-### 5.2 各文件职责与接口
+### 7.2 各文件职责与接口
 
-#### `modal_decomp.py`
-```
-输入: edge_index [2,E], pos [N,2], node_type [N], num_modes=6
-输出: f_md [N, 6]   (每个节点的模态特征)
-依赖: scipy.sparse.linalg.eigsh (LOBPCG)
-耗时: ~1-3 秒/case
-```
+| 文件 | 输入 | 输出 | 依赖 | 耗时 | 状态 |
+| --- | --- | --- | --- | --- | --- |
+| `modal_decomp.py` | edge_index, pos, node_type, cells, m=6 | f_md [N,6], eigvals | scipy.eigsh | ~1-3s/case | ✅ |
+| `segmentation.py` | edge_index, pos, f_md, f_obs, K=[64,256], τ, δ | levels=[L0,L1], adjacency | pymetis, torch_scatter | ~0.5s/case | ✅ |
+| `pe.py` | levels, edge_index, steps=16 | rwse=[L0[64,16],L1[256,16]], node_pe | torch.sparse | ~0.2s/case | ⬜ |
+| `physics_ops.py` | u, v, pos, edge_index, (u_prev) | {G,ω,M,S}[N], +虚拟步 | torch_scatter | ~1ms/step | ⬜ |
+| `amr_router.py` | levels, phys, thresholds | kept_assign[N], depth[N], T | torch_scatter | ~0.5ms/step | ⬜ |
+| `micro_gnn.py` | node_feat, edge_feat, graph | h_node [N,d]（旁路 decoder）| MeshGraphNet | — | ⬜ |
+| `macro_transformer.py` | h_node, kept_assign, rwse, mask | h_cat [N,2d] | torch.nn.Transformer | — | ⬜ |
+| `model.py` | PyG Data (graph_t) | pred [N,3] | 上述全部 | — | ⬜ |
 
-#### `segmentation.py`
-```
-输入: edge_index, pos, f_md, f_obs, K_list=[64,256], tau=1.0
-输出: partition_levels = [L0_assign[N], L1_assign[N]]
-依赖: pymetis (METIS), torch_scatter
-耗时: ~0.5 秒/case
-```
+> **`micro_gnn.py` 落地决策**：`MeshGraphNet.forward` 默认含 decoder。两种实现路径——(a) 直接调用其 `.processor`（需手动先过 `node_encoder/edge_encoder`）；(b) 将 `output_dim=d`，把内置 decoder 当作首层投影，统一 decoder 仍在 `model.py`。**推荐 (a)**，语义最清晰、与 M4GN「detach decoder」一致。
 
-#### `pe.py`
-```
-输入: partition_levels, edge_index, num_steps=16
-输出: rwse_pe = [rwse_L0[64, 16], rwse_L1[256, 16]]
-依赖: torch.sparse
-耗时: ~0.2 秒/case
-```
+### 7.3 关键第三方依赖
 
-#### `physics_ops.py`
-```
-输入: u[N], v[N], pos[N,2], edge_index[2,E]
-输出: dict {G[N], omega[N], M[N], S[N]}
-依赖: torch_scatter (1-ring least-square)
-耗时: ~1ms/step (在线)
-```
-
-#### `amr_router.py`
-```
-输入: partition_levels, phys_per_node, thresholds (sampled)
-输出: kept_assign[N], kept_depth[N], num_tokens T
-依赖: torch_scatter
-耗时: ~0.5ms/step (在线)
-```
-
-#### `model.py`
-```
-输入: PyG Data (graph_t)
-输出: predictions [N, 3]
-组合: micro_gnn → physics_ops → amr_router → segment_encode → transformer → dispatch → decoder
-```
-
-### 5.3 关键第三方依赖
-
-| 库 | 用途 | 安装命令 |
+| 库 | 用途 | 安装 |
 | --- | --- | --- |
-| `pymetis` | METIS 图分区 | `pip install pymetis` |
-| `torch_geometric` | 图数据结构、scatter 操作 | 已有 |
-| `scipy` | 稀疏特征值求解 | 已有 |
-| `torch_scatter` | 高效聚合 | 随 PyG 安装 |
+| `pymetis` | METIS 图分区 | `pip install pymetis`（Windows 困难则 fallback 谱聚类）|
+| `torch_geometric` / `torch_scatter` | 图结构、scatter 聚合 | 已有 |
+| `scipy` | 稀疏特征值 | 已有 |
+| `tfrecord` | 读 cylinder_flow TFRecord | `pip install tfrecord` |
 
 ---
 
-## 六、研发里程碑
+## 八、研发里程碑
 
-### M1：离线预处理验证（预计 3 天）
+| 里程碑 | 目标 | 交付物 | 工期 | 状态 |
+| --- | --- | --- | --- | --- |
+| **M1** 离线预处理 | 模态分解+分区合理 | modal_decomp+segmentation+可视化（6 图）| 3 天 | ✅ 已完成 |
+| **M2** 物理量算子 | G/ω/M/S 正确，能区分活跃/平静区 | physics_ops + 四标量场可视化 | 2 天 | ⬜ |
+| **M3** AMR Router | 二层 fold/keep 决策正确 | amr_router + 保留/合并可视化 + T 分布统计 | 2 天 | ⬜ |
+| **M4** 端到端跑通 | 单 case overfit 成功 | model+train_amr_m4gn+config + loss 下降曲线 | 3 天 | ⬜ |
+| **M5** 全量训练+对比 | 与 MGN/X-MGN 公平对比 | checkpoint + 对比表 + rollout 曲线 + token 统计 | 5 天 | ⬜ |
+| **M6** 消融 | 验证各模块贡献 | §6.5 八组消融表 + 分析报告 | 5 天 | ⬜ |
+| **M7** EAGLE 扩展（可选）| 大规模能力验证 | EAGLE reader + 大网格结果 | 5 天 | ⬜ |
 
-**目标**：确认模态分解和分区在圆柱绕流数据上表现合理
-
-**交付物**：
-- `modal_decomp.py` + `segmentation.py` + `pe.py`
-- 可视化图：前 6 个 Laplacian 模画在 mesh 上
-- 可视化图：64/256 两层分区着色画在 mesh 上
-- 验证：尾迹处和来流处分到不同 segment
-
-### M2：物理量算子验证（预计 2 天）
-
-**目标**：确认物理量计算正确，能区分活跃区和平静区
-
-**交付物**：
-- `physics_ops.py`
-- 可视化图：G, omega, M, S 四个标量场画在 mesh 上
-- 验证：圆柱后方（涡街）omega 显著高于来流区
-
-### M3：AMR Router 单测（预计 2 天）
-
-**目标**：确认 AMR 决策逻辑正确
-
-**交付物**：
-- `amr_router.py`
-- 测试：给定固定阈值，画出"哪些 segment 被保留为细 token，哪些被合并"
-- 统计：不同时间步的 T 值分布
-
-### M4：端到端训练跑通（预计 3 天）
-
-**目标**：完整模型在单个 case 上 overfit 成功
-
-**交付物**：
-- `model.py` + `train_amr_m4gn.py` + `config_amr_m4gn.yaml`
-- 训练曲线：loss 稳定下降
-- 验证：overfit case 的预测 vs ground truth 可视化
-
-### M5：全数据集训练 + 对比（预计 5 天）
-
-**目标**：与 MGN baseline 进行公平对比
-
-**交付物**：
-- 全量训练完成的 checkpoint
-- 对比表：NMSE/MAE/MSE/FLOPs/时间
-- Rollout 曲线对比
-- token 数统计分析
-
-### M6：消融实验（预计 5 天）
-
-**目标**：验证每个模块的贡献
-
-**交付物**：
-- 消融实验表（§4.4 中列出的 6 组实验）
-- 分析报告
-
-**总预计工期**：约 20 个工作日（4 周）
+**主线总工期**：约 20 工作日（4 周）；含 EAGLE 扩展约 5 周。
 
 ---
 
-## 七、技术风险与应对方案
+## 九、技术风险与应对
 
-| 风险 | 可能性 | 影响 | 应对措施 |
+| 风险 | 可能性 | 影响 | 应对 |
 | --- | --- | --- | --- |
-| Laplacian 求解在边界条件不正确时特征值退化 | 中 | 模态无意义 | 用 Neumann BC 替代 Dirichlet；加 shift-invert 稳定 |
-| METIS 在窄长区域产生不均匀 segment | 低 | 某些 segment 只有几个节点 | SLIC 精修 + 最小尺寸检查 |
-| 训练初期物理量分布不稳定，AMR 随机抖动 | 高 | 收敛慢 | 前 5 epoch 关闭 AMR，全部使用 L1 (warm-up) |
-| 变长 token batch padding 比例过高 | 中 | 浪费显存 | 按 T 排序组 batch / nested tensor |
-| 15步 GNN 过平滑 | 低 | 节点嵌入趋同 | recompute_activation + residual connection (MGN 已有) |
-| pymetis 安装困难 (Windows) | 中 | 无法分区 | 备选：networkx 的 metis binding 或 torch_geometric 自带 |
+| Laplacian 边界条件不当致特征值退化 | 中 | 模态无意义 | Neumann 替代 Dirichlet；shift-invert 稳定；可视化校验 |
+| METIS 在窄长区域产生不均匀段 | 低 | 某些段仅几节点 | SLIC 精修 + 最小尺寸检查（<4 不细分）|
+| 训练初期物理量不稳，AMR 抖动 | 高 | 收敛慢 | 前 5 epoch 关 AMR 全用 L1（warm-up）|
+| 变长 token batch padding 比例高 | 中 | 浪费显存 | 按 T 排序组 batch / nested tensor / mask |
+| 15 步 GNN 过平滑 | 低 | 节点嵌入趋同 | residual（MGN 已有）+ recompute_activation；消融对比 7/15 步 |
+| `MeshGraphNet` decoder 旁路接口不稳 | 中 | 集成报错 | 采用 §7.2 路径 (a)，加单测确认 processor 输出形状 |
+| pymetis Windows 安装困难 | 中 | 无法分区 | fallback 谱聚类；或 WSL/容器内装 |
+| EAGLE 数据规模大，单卡训不动 | 中 | 扩展受阻 | DDP 多卡 + AMR 减 token；必要时引入 X-MGN 式 Halo 分块（见 §十二）|
 
 ---
 
-## 八、后续扩展方向
+## 十、与开题 PPT 的对应关系
 
-1. **3D 扩展**：quadtree → octree，2D METIS → 3D METIS，Laplacian 3D 版本
-2. **更大网格**：当 N > 10万时，micro GNN 可改为 segment 内并行
-3. **多物理场**：加密度、温度通道，AMR 判据可扩展为"密度梯度"等
-4. **时序 AMR**：当前 AMR 只看 t 时刻，可加入 t-1 时刻外推（AMR-Transformer 的 virtual step）
-5. **可学习阈值**：把阈值从采样改为可学习参数（Gumbel-Softmax 或强化学习）
+| PPT 章节 | 本文档对应 |
+| --- | --- |
+| 研究背景（CNN→MGN→X-MGN→Transformer）| §一 |
+| 研究意义及目标（长程丢失、过平滑、混合架构+AMR）| §1.2 / §三 / §四 |
+| 创新点（物理驱动 Token 剪枝、混合架构、动态聚合）| §三 |
+| 实验方案（EAGLE/METIS/Halo、局部 GNN、全局 Token 剪枝、自回归+噪声、对比 MGN/X-MGN）| §六 |
+| 评估指标（RMSE、长程累积、显存峰值、推理延迟、过平滑）| §6.4 |
+| 计划进度 | §八 |
 
 ---
 
-## 九、参考文献
+## 十一、后续扩展方向
+
+1. **EAGLE / 大规模湍流**：迁移到数千~百万节点网格，验证 AMR 剪枝的算力节省与 Transformer 长程优势。
+2. **X-MGN 式可扩展性（正交叠加）**：当单图大到塞不进单卡时，引入 METIS 分区 + Halo 重叠区（厚度=消息传递层数）+ 梯度聚合，使分块训练严格等价于整图——与本工作 Transformer 全局层**正交**，可叠加。小网格主线不启用。
+3. **3D 扩展**：四叉树→八叉树，2D METIS→3D METIS，Laplacian 3D 版本。
+4. **多物理场**：加密度、温度通道，AMR 判据扩展为「密度梯度」等。
+5. **可学习阈值**：把 AMR 阈值从采样改为可学习参数（Gumbel-Softmax 或强化学习，参考 Swarm RL for AMR）。
+
+---
+
+## 十二、参考文献
 
 1. Xu et al., "AMR-Transformer: Enabling Efficient Long-range Interaction for Complex Neural Fluid Simulation," CVPR 2025.
 2. Lei et al., "M4GN: Mesh-based Multi-segment Hierarchical Graph Network for Dynamic Simulations," TMLR 2025.
-3. Pfaff et al., "Learning Mesh-Based Simulation with Graph Networks," ICLR 2021.
-4. Karypis & Kumar, "A Fast and High Quality Multilevel Scheme for Partitioning Irregular Graphs," SIAM J. Sci. Comput., 1998.
-5. Achanta et al., "SLIC Superpixels Compared to State-of-the-Art Superpixel Methods," IEEE TPAMI, 2012.
-6. Li et al., "Fourier Neural Operator for Parametric Partial Differential Equations," ICLR 2021.
+3. Nabian et al., "X-MeshGraphNet: Scalable Multi-Scale Graph Neural Networks for Physics Simulation," NVIDIA 2024.
+4. Pfaff et al., "Learning Mesh-Based Simulation with Graph Networks," ICLR 2021.
+5. Janny et al., "EAGLE: Large-scale Learning of Turbulent Fluid Dynamics with Mesh Transformers," ICLR 2023.
+6. Karypis & Kumar, "A Fast and High Quality Multilevel Scheme for Partitioning Irregular Graphs," SIAM J. Sci. Comput., 1998.
+7. Achanta et al., "SLIC Superpixels Compared to State-of-the-Art Superpixel Methods," IEEE TPAMI, 2012.
+8. Godwin et al., "Simple GNN Regularisation for 3D Molecular Property Prediction & Beyond," 2021（噪声注入）.
+9. Rampášek et al., "Recipe for a General, Powerful, Scalable Graph Transformer (GPS)," NeurIPS 2022（RWSE PE）.
 
 ---
 
-## 十、总结
+## 十三、总结
 
-本工作提出 AMR-M4GN 混合架构，创新性地将三个思想融合：
+本工作提出 **AMR-M4GN** 混合架构，创新性融合三个思想：
 
-1. **M4GN 的层次化分区**：确保分区连通性和物理一致性
-2. **AMR-Transformer 的动态 token 化**：根据实时物理状态自适应调节计算粒度
-3. **深层 GNN + Transformer 的互补分工**：GNN 负责局部精细物理，Transformer 负责全局长程交互
+1. **M4GN 的层次化分区**：METIS+SLIC+模态分解，保证分区连通性、几何保真与物理一致。
+2. **AMR-Transformer 的动态 Token 化**：把结构化四叉树的物理驱动剪枝迁移到非结构层次 METIS 树，根据实时物理状态自适应调节计算粒度。
+3. **深层 GNN + 段级 Transformer 的互补分工**：GNN 管局部精细物理（高频/短程），Transformer 管全局长程交互（低频/全局压力耦合）。
 
-该方案在理论上几乎不增加计算成本（Transformer 部分仅占总 FLOPs 的 ~1%），同时有望显著提升长程依赖建模能力和 rollout 稳定性。代码实现完全基于现有 PhysicsNeMo 生态，与原 MGN baseline 兼容共存，便于公平对比。
+该方案在理论上几乎不增加计算成本（Transformer 部分仅占总 FLOPs 的 ~1%），同时从机理上解决 MGN 的长程依赖丢失与过平滑问题，有望显著提升 rollout 稳定性。实现完全基于现有 PhysicsNeMo 生态，与原 MGN baseline 兼容共存，便于公平对比；并预留向 EAGLE 大规模湍流与 X-MGN 式 Halo 扩展的清晰路径。
