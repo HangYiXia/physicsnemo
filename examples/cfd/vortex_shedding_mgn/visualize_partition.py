@@ -59,11 +59,15 @@ class _Tee:
 
     def write(self, data):
         for s in self.streams:
+            if getattr(s, "closed", False):
+                continue
             s.write(data)
             s.flush()
 
     def flush(self):
         for s in self.streams:
+            if getattr(s, "closed", False):
+                continue
             s.flush()
 
 
@@ -446,7 +450,15 @@ def main():
             f"run_log_case{args.case_idx}_t{args.timestep}.txt",
         )
         _log_handle = open(log_path, "w", encoding="utf-8")
-        atexit.register(lambda: (_log_handle.flush(), _log_handle.close()))
+
+        def _close_log():
+            # Restore the real stdout BEFORE closing the file, so the
+            # interpreter's final flush doesn't hit the closed log handle.
+            sys.stdout = sys.__stdout__
+            _log_handle.flush()
+            _log_handle.close()
+
+        atexit.register(_close_log)
         sys.stdout = _Tee(sys.__stdout__, _log_handle)
         print(f"[log] Console output is also saved to: {os.path.abspath(log_path)}")
 

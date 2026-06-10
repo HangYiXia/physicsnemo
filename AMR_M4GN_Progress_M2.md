@@ -2,7 +2,7 @@
 
 **更新日期**：2026年6月10日
 **当前阶段**：M2 — N-S 物理量算子（G/ω/M/S + 1-ring 最小二乘梯度 + 虚拟步）+ 四标量场可视化
-**M2 状态**：⚠️ **代码已实现，可视化已用真实 t=300 数据（4 case）确认物理形态/量级正确，但尚未判定完成**——更新版 pytest（解析场精确值）、标签正确的 S 图、终端无告警这三项还没实跑确认。下文凡涉及「测试通过/闭环」的，除非注明是你实跑的真实数据，否则视为「待重跑确认」。
+**M2 状态**：✅ **核心验收已全部通过**（pytest 8/8 新 S 版、4 case×t=300 物理形态/量级正确、S 标签正确、无 ARPACK/get_cmap 告警）。唯一遗留是退出时一个**与物理无关的日志 flush 报错**（已修代码，待你重跑确认消失）。补这一步即可正式关闭 M2。
 **前置**：M1 已由你实跑 4 个 case 验证关闭（环境、数据集下载、`visualize_partition.py` 基础用法见 `AMR_M4GN_Progress_M1.md`，本文不重复）
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§4.6 / §7.4.2 / §八 M2）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
@@ -59,9 +59,9 @@ M2 目标（Design Doc §八 M2）：**算对 4 个物理判据，能区分活�
 
 - **`--plot_physics`** 开关（默认关，**不影响 M1 既有 6 图流程**）。开启后多出 `07_physics_fields.png`（2×2：G/ω/M/S）+ 终端打印 `min/max/|·|p99`。
 - **`--timestep`** 开关（默认 0）。**重要**：t=0 是初始未发展流，**没有 Kármán 涡街**；想看脱涡尾迹必须加 `--timestep 300` 或更晚。
-- **终端日志落盘**：默认写 `partition_vis/run_log_case<idx>_t<t>.txt`，便于多 case 跑完回查（见 §六 实测表是怎么得到的）。
-- 配色：ω 用对称发散色标 `RdBu_r`（有正负号）；G、M、S 恒 ≥ 0 用 `viridis`；均按 p99 截断，防离群值压扁色阶。
-  > **绘图 spec 修正（你已跑出的图里 S 还是旧标签）**：你产出的 `07_physics_fields.png` 中 S 子图标题仍是「KH shear du/dy−dv/dx」且用了发散色标——那是 `plot_physics_fields` 的绘图 spec 没跟着 S 公式一起改。**S 的数值已是新的应变率幅值（日志 `S min=0.169≥0` 可证）**，只是标题/色标画错。现已改为标题「Strain-rate sqrt(2 S_ij S_ij)」+ `viridis`。**需重跑才能得到标签正确的 S 图。**
+- **终端日志落盘**：默认写 `partition_vis/case<idx>/run_log_case<idx>_t<t>.txt`，便于多 case 跑完回查（见 §六 实测表是怎么得到的）。
+  > **已修一个日志 bug**：早期版本退出时会报 `ValueError: I/O operation on closed file`（`_Tee.flush` 对已被 `atexit` 关闭的日志文件 flush）。无害（图与日志都已写完），但难看。已修：① `atexit` 清理时先恢复 `sys.stdout=sys.__stdout__` 再关文件；② `_Tee` 跳过已关闭的流。**此修复尚未由你重跑确认报错消失。**
+- 配色：ω 用对称发散色标 `RdBu_r`（有正负号）；G、M、S 恒 ≥ 0 用 `viridis`；均按 p99 截断，防离群值压扁色阶。S 子图标题为「Strain-rate sqrt(2 S_ij S_ij)」（重跑后已确认正确）。
 
 > ⚠️ 已知小遗留：`02_velocity.png` 标题硬编码 `(timestep 0)`，与 `--timestep` 不联动。M3 顺手修。
 
@@ -73,16 +73,16 @@ M2 目标（Design Doc §八 M2）：**算对 4 个物理判据，能区分活�
 
 | 测试 | 场 | 期望 | 容差 | 状态 |
 | --- | --- | --- | --- | --- |
-| `test_linear_gradient_exact` | f=3x+2y | ∇f=(3,2) | <1e-3 | ⏳ 待重跑 |
-| `test_shear_flow_vorticity` | u=y,v=0 | ω=−1, **S=1**, G=1（ω≠S，证独立）| <5e-2 | ⏳ 待重跑 |
-| `test_rotation_vorticity` | u=−y,v=x | ω=2, **S=0**（纯旋转无应变）| <5e-2 | ⏳ 待重跑 |
-| `test_uniform_flow_zero_gradient` | u=1,v=0 | G≈ω≈S≈0 | <1e-3 | ⏳ 待重跑 |
-| `test_momentum_indicator` | u=3,v=4,area=1 | M=5 | <1e-4 | ⏳ 待重跑 |
-| `test_denormalize_velocity` | — | phys=norm·std+mean | 精确 | ⏳ 待重跑 |
-| `test_virtual_step` | — | uv+(uv−prev) | 精确 | ⏳ 待重跑 |
-| `test_no_nan_tiny_graph` | 3 节点退化图 | 全有限 | — | ⏳ 待重跑 |
+| `test_linear_gradient_exact` | f=3x+2y | ∇f=(3,2) | <1e-3 | ✅ PASS |
+| `test_shear_flow_vorticity` | u=y,v=0 | ω=−1, **S=1**, G=1（ω≠S，证独立）| <5e-2 | ✅ PASS |
+| `test_rotation_vorticity` | u=−y,v=x | ω=2, **S=0**（纯旋转无应变）| <5e-2 | ✅ PASS |
+| `test_uniform_flow_zero_gradient` | u=1,v=0 | G≈ω≈S≈0 | <1e-3 | ✅ PASS |
+| `test_momentum_indicator` | u=3,v=4,area=1 | M=5 | <1e-4 | ✅ PASS |
+| `test_denormalize_velocity` | — | phys=norm·std+mean | 精确 | ✅ PASS |
+| `test_virtual_step` | — | uv+(uv−prev) | 精确 | ✅ PASS |
+| `test_no_nan_tiny_graph` | 3 节点退化图 | 全有限 | — | ✅ PASS |
 
-> ⚠️ **测试期望已随新 S 更新**（shear S=1、rotation S=0）。你之前看到的「8 passed in 1.30s」是**改 S 公式之前**的旧版本结果，对新测试**无效**。新版 pytest 尚未实跑确认，全部标「待重跑」。我只用纯 numpy 离线复刻校验过公式（非仓库 torch 代码、非 pytest）。
+> ✅ **新 S 版本已实跑确认**：`pytest tests/test_physics_ops.py -v` → **8 passed in 1.38s**（gnn 环境，Python 3.13.12）。其中 `test_rotation_vorticity`（rotation S=0）、`test_shear_flow_vorticity`（shear S=1）均通过，证明应变率幅值公式在解析场上精确正确。
 
 ---
 
@@ -132,7 +132,7 @@ python -c "from amr_m4gn import compute_ns_quantities, lstsq_gradient, virtual_s
 pytest tests/test_physics_ops.py -v
 ```
 
-**为什么先跑这个**：解析场上验证算子正确性，先排掉「算子错」与「数据/可视化错」的耦合。**注意：本轮改了 S 公式与 2 个测试，须重跑确认（你之前的 8 passed 是改之前的版本）。**
+**为什么先跑这个**：解析场上验证算子正确性，先排掉「算子错」与「数据/可视化错」的耦合。**已实跑确认（新 S 版）：`8 passed in 1.38s`**，含 rotation S=0、shear S=1。
 
 ### 步骤 3 — 在真实 case 上出物理量图（4 case 对照）
 
@@ -171,7 +171,7 @@ python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_fl
 | **G** (左上 viridis) | 圆柱表面一圈最亮，圆柱后方拖出一条/两条剪切层亮带延伸到 x≈0.9，来流暗 | ✅ 边界层 + 尾迹剪切层梯度被正确捕捉 |
 | **ω** (右上 RdBu_r) | 圆柱上下表面红/蓝偶极，尾迹中红蓝交替斑块向下游延伸（Kármán 涡街），来流≈白 | ✅ 脱涡序列清晰、符号正确，正是 M3 要区分的活跃区 |
 | **M** (左下 viridis) | 来流入口亮、通道内斑驳、圆柱处=0 | ✅ `M=ρ\|U\|·area`，形态合理；斑驳是 Voronoi area 离散噪声，不影响段聚合 |
-| **S** (右下) | ⚠️ **当前图标题仍是「KH shear du/dy−dv/dx」+ 发散色标** | **数值已是新 S（日志 `S min=0.169≥0`、`S p99=176.6`），但这张图是在我修绘图 spec 之前跑的，标题/色标画错。需同步代码后重跑，才能得到标题「Strain-rate …」+ viridis 的正确 S 图。** |
+| **S** (右下 viridis) | 标题「Strain-rate sqrt(2 S_ij S_ij)」，应变集中在圆柱表面+尾迹剪切层，来流低，全 ≥ 0（`S min=0.169`、`S p99=176.6`）| ✅ 重跑后标签/配色已正确；S 形态与 ω **不镜像**（旋转涡核处低、剪切层处高）→ 印证 S 与 ω 独立，是有效的第 4 个判据 |
 
 **结论**：t=300 下 G/ω/M 三个子图形态都对，尾迹涡街可见，物理上能区分活跃区（尾迹/壁面）与平静区（来流）；唯一遗留是 **S 子图的标签/配色**需重跑刷新（数值本身已正确）。
 
@@ -185,18 +185,18 @@ python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_fl
 
 | 验收点 | 看哪里 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| **A. 单测** | `pytest` 输出 | 8/8 PASS | ⏳ **须重跑**：你那次 8/8 是**改 S 公式之前**的版本；本轮改了 S 与 2 个测试（rotation S=0、shear S=1），新版未实跑确认 |
+| **A. 单测** | `pytest` 输出 | 8/8 PASS | ✅ **8 passed in 1.38s**（新 S 版，rotation S=0 / shear S=1 均过）|
 | **B. 尾迹 ω** | `07` 的 ω 子图 | t=300 圆柱后方红蓝交替脱涡（Kármán 涡街）| ✅ 真实 t=300 图已见脱涡（case0；4 case 量级 \|ω\|p99=68–208）|
 | **C. 边界层/尾迹 G** | `07` 的 G 子图 | 壁面/圆柱表面 + 尾迹剪切层亮，来流暗 | ✅ 真实 t=300 图符合 |
 | **D. 量级合理（D1）** | 终端 \|ω\|p99 | 物理速度下量级合理、跨 case 同量级 | ✅ 真实 t=300 四 case：68.5 / 133 / 188 / 208，同数量级 |
 | **E. M 形态** | `07` 的 M 子图 | 来流/出流亮、圆柱 0、不爆炸 | ✅ 真实图符合 |
 | **F. 跨 case 一致** | 多 case 量级 | 量级浮动 <10× | ✅ 浮动约 3× |
 | **G. 不破坏 M1** | 仍产出 `01`~`06` + cache（`caseN/` 子目录）| 原 6 图照常 | ✅ 4 case 子目录齐全 |
-| **H. S 子图标签正确** | `07` 的 S 子图 | 标题「Strain-rate …」+ viridis | ⏳ **当前图仍是旧标签（运行早于绘图修复）；数值已是新 S（`S min=0.169≥0`），须重跑刷新标签** |
-| **I. 无残留告警** | 终端（告警走 stderr，不进日志 txt）| 无 ARPACK / get_cmap 告警 | ⏳ λ₁≈0 暗示 dtype 修复生效，但须看重跑终端确认告警真消失 |
-| **I. 无残留告警** | 终端（注意告警走 stderr，不进日志 txt）| 无 ARPACK / get_cmap 告警 | ⏳ 须看重跑时的终端确认（日志只抓 stdout）|
+| **H. S 子图标签正确** | `07` 的 S 子图 | 标题「Strain-rate …」+ viridis | ✅ 重跑后已正确：标题「Strain-rate sqrt(2 S_ij S_ij)」+ viridis，形态与 ω 不镜像 |
+| **I. 无残留告警** | 终端 | 无 ARPACK / get_cmap 告警 | ✅ 4 次 t=300 运行终端均无这两条告警（λ₁≈0 也佐证 dtype 修复生效）|
+| **J. 退出无报错** | 终端结尾 | 无 `I/O operation on closed file` | ⏳ 该报错是日志功能 bug，**已修但未由你重跑确认**（下次跑应消失）|
 
-**M2 通过标准（尚未达成）**：A~I 全部满足 + D1 在发展态确认 → 才能关闭 M2。**当前 A/H/I 仍是「待重跑确认」，故 M2 暂不能判定完成。** 见文末「能否判定完成」结论。
+**M2 通过标准**：A~I 全部满足 → ✅ **已达成**（pytest 8/8、4 case×t=300 物理形态/量级正确、S 标签正确、无告警）。唯一遗留 **J**（退出时的日志 flush 报错）已修代码，待你重跑确认消失即可彻底收尾。
 
 ---
 
@@ -233,18 +233,17 @@ python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_fl
 
 ---
 
-## 十、M2 能否判定完成？（当前结论：否）
+## 十、M2 能否判定完成？（当前结论：核心已通过，仅剩 1 个 cosmetic 修复待确认）
 
-**已用真实运行确认的**（你实跑的 4 case × t=300 数据/图）：
-- 物理形态：G 图显示边界层+尾迹剪切层、ω 图显示圆柱后红蓝交替脱涡（Kármán 涡街）、M 图形态合理；
+**已用真实运行确认的**（你实跑的数据/图/测试）：
+- **pytest 8/8 通过**（新 S 版，`8 passed in 1.38s`，含 rotation S=0、shear S=1）→ 算子在解析场上精确正确；
+- 物理形态：4 case × t=300，G 图显示边界层+尾迹剪切层、ω 图显示圆柱后红蓝交替脱涡（Kármán 涡街）、M 图形态合理；
 - 量级合理：`|ω|p99 = 68.5 / 133 / 188 / 208`（4 case），同数量级，与 BL 涡量估计同阶；
-- **新 S 已生效**：`S min` 全 > 0（0.04–0.49）、`S p99 ≠ |ω|p99` → 应变率幅值已在真实数据上独立于涡量；
-- **λ₁ ≈ 0（±1e-5）干净**：暗示 `modal_decomp` 的 float64 修复已生效；
+- **新 S 已生效且标签正确**：`S min` 全 > 0、`S p99 ≠ |ω|p99`；S 子图标题「Strain-rate sqrt(2 S_ij S_ij)」+ viridis，形态与 ω 不镜像；
+- **无 ARPACK / get_cmap 告警**：4 次 t=300 运行终端均无（λ₁≈0 也佐证 dtype 修复生效）；
 - 按 `case_idx` 分文件夹 + 终端日志落盘均生效（4 个 case 子目录齐全）。
 
-**尚未确认、阻塞 M2 关闭的**：
-1. **更新版 pytest 未重跑**：本轮改了 S 公式与 2 个测试期望（rotation S=0、shear S=1）。你之前的「8 passed」是改之前的版本，对新测试无效。可视化只验证了「形态/量级合理」，没验证解析场上的**精确值**（pytest 才验这个）。
-2. **标签正确的 S 图未重跑**：当前 `07` 图的 S 子图标题/色标是旧的（运行早于绘图修复）；数值已正确，只是标签错，重跑即刷新。
-3. **告警是否完全消失未确认**：ARPACK/get_cmap 走 stderr，不进日志（λ₁ 干净是间接证据，但不等于确认）。
+**唯一遗留（已修代码，待你重跑确认）**：
+- 退出时报 `ValueError: I/O operation on closed file`（我加的日志 `_Tee` 在 `atexit` 关闭文件后仍被 flush）。**无害**——图、日志、统计都在报错前已全部写完。已修：`atexit` 先恢复 `sys.stdout` 再关文件 + `_Tee` 跳过已关闭流。**需你把更新后的 `visualize_partition.py` 同步到 `C:\GitHub` 再跑一次，确认结尾不再出现该报错。**
 
-**结论**：M2 的**算子实现 + 可视化 + 物理形态/量级**已被 4 个 case 的真实 t=300 运行强力支持，方向明确正确；但 **pytest（解析场精确值）未用新版重跑**、**S 子图标签未刷新**、**告警未在终端确认**这三项还没闭环，因此**暂不判定 M2 完成**。补这两步即可关闭：① `pytest tests/test_physics_ops.py -v`（确认新 S 测试全过）；② 同步绘图修复后 `--timestep 300 --plot_physics` 重跑一次（看正确标签的 S 图 + 终端无告警）。
+**结论**：M2 的**全部物理/功能验收点（A~I）均已用真实运行通过**，可判定 **M2 实质完成**；唯一未闭环的是上面那个**与物理无关的日志退出报错（J）**，代码已修，等你重跑确认报错消失，即可正式关闭 M2、进入 M3。
