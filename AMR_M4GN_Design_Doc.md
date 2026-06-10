@@ -3,7 +3,7 @@
 ## 研究设计文档（开题对应版）
 
 **作者**：储润东（124037910068）
-**日期**：2026年5月14日（修订）
+**日期**：2026年6月10日（修订）
 **仓库**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
 **主线 Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
 **对比 Baseline**：MGN、X-MeshGraphNet (X-MGN)、M4GN、节点级 Graph-Transformer
@@ -202,7 +202,8 @@ X-MGN 针对 MGN 的**可扩展性**做了三点优化：
 d(i, C_k) = ‖f_obs_i − f_obs_Ck‖ + ‖f_md_i − f_md_Ck‖ + τ·‖x_i − x_Ck‖
 ```
 
-- `f_obs`：节点到圆柱壁面的有符号距离（1 维，自动检测 node_type 壁面节点）。
+- `f_obs`：节点到固体壁面的距离（1 维，自动检测 `node_type==6` WALL_BOUNDARY 节点）。
+  > **不确定点 U1-b**：DeepMind 约定下圆柱壁与上下通道壁**同为 type 6**，仅凭 node_type 无法区分圆柱与外墙；当前用「到最近壁面距离」（含外墙）作为 SLIC 特征，对边界层细分仍合理。若需「仅圆柱」距离，后续用几何过滤（排除位于域包围盒上的 type-6 簇）。`compute_obstacle_distance` 默认 `obstacle_type_id=6`（5 是 OUTFLOW 出口，曾误设为 5，M1 已修正）。
 - `f_md`：模态特征（6 维）；`x`：空间坐标（2 维）；`τ=1.0` 控制紧凑性。
 - 特征与坐标均做 [0,1] 归一化，保证 τ 物理含义一致。
 - **连通性约束**：节点只能重分配到「邻居所属」的段，避免跨空隙连接（修正 same-size k-means 的缺陷）。
@@ -463,22 +464,202 @@ physicsnemo/examples/cfd/vortex_shedding_mgn/
     └── model.py                   # [新建] AMRM4GN 顶层模型
 ```
 
-### 7.2 各文件职责与接口
+### 7.2 数据管线现状与关键改造点（务必先读）
 
-| 文件 | 输入 | 输出 | 依赖 | 耗时 | 状态 |
-| --- | --- | --- | --- | --- | --- |
-| `modal_decomp.py` | edge_index, pos, node_type, cells, m=6 | f_md [N,6], eigvals | scipy.eigsh | ~1-3s/case | ✅ |
-| `segmentation.py` | edge_index, pos, f_md, f_obs, K=[64,256], τ, δ | levels=[L0,L1], adjacency | pymetis, torch_scatter | ~0.5s/case | ✅ |
-| `pe.py` | levels, edge_index, steps=16 | rwse=[L0[64,16],L1[256,16]], node_pe | torch.sparse | ~0.2s/case | ⬜ |
-| `physics_ops.py` | u, v, pos, edge_index, (u_prev) | {G,ω,M,S}[N], +虚拟步 | torch_scatter | ~1ms/step | ⬜ |
-| `amr_router.py` | levels, phys, thresholds | kept_assign[N], depth[N], T | torch_scatter | ~0.5ms/step | ⬜ |
-| `micro_gnn.py` | node_feat, edge_feat, graph | h_node [N,d]（旁路 decoder）| MeshGraphNet | — | ⬜ |
-| `macro_transformer.py` | h_node, kept_assign, rwse, mask | h_cat [N,2d] | torch.nn.Transformer | — | ⬜ |
-| `model.py` | PyG Data (graph_t) | pred [N,3] | 上述全部 | — | ⬜ |
+> 以下源自对 `VortexSheddingDataset`、`train.py`、`MeshGraphNet` 真实代码的核对，是后续所有实现的前提。**若忽略，整条链路会在拿不到坐标/分区时崩溃。**
 
-> **`micro_gnn.py` 落地决策**：`MeshGraphNet.forward` 默认含 decoder。两种实现路径——(a) 直接调用其 `.processor`（需手动先过 `node_encoder/edge_encoder`）；(b) 将 `output_dim=d`，把内置 decoder 当作首层投影，统一 decoder 仍在 `model.py`。**推荐 (a)**，语义最清晰、与 M4GN「detach decoder」一致。
+**A. 坐标 `pos` 与 `cells` 在训练 split 不可见（关键障碍）**
 
-### 7.3 关键第三方依赖
+`VortexSheddingDataset.__getitem__` 仅在 `split != "train"` 时把 `mesh_pos`、`cells`、`rollout_mask` 附到样本上；训练 split 的 `graph` 只有 `graph.x [N,6]`、`graph.edge_attr [E,3]`、`graph.y [N,3]`、`graph.edge_index`。而 `edge_attr` 是**归一化后**的 `[dx, dy, |d|]`（减均值除标准差），**无法直接当作真实相对坐标**。
+
+- **影响**：`physics_ops`（梯度需真实 Δx）、`segmentation`/`modal_decomp`（需 pos）、AMR 段质心（需 pos）全都依赖 `pos`。
+- **应对（推荐方案，二选一并在 M4 前定夺）**：
+  - **方案 P1（推荐）**：新增轻量子类 `VortexSheddingDatasetAMR(VortexSheddingDataset)`，在 `__init__` 缓存每个 case 的 `mesh_pos[i]`、`cells[i]`，并在 `__getitem__`（train 分支）把 `graph.pos`（原始坐标）、`graph.gidx`（case 索引）一并返回。**不改动原 `VortexSheddingDataset`**，零风险，与 baseline 共存。
+  - **方案 P2**：在 `physics_ops` 内用 `edge_stats`（`edge_mean/edge_std`，已存 `edge_stats.json`）**反归一化** `edge_attr[:, :2]` 得到真实 Δx。可行但把统计量耦合进模型前向，可读性差。**仅当 P1 受阻时用。**
+- **不确定点 U1**：原始 `mesh_pos` 是否已做坐标归一化、不同 case 是否同坐标系——需在 M2 用 `visualize_partition.py` 打印 `pos.min/max` 确认。若各 case 坐标尺度不一，`physics_ops` 的绝对阈值需改为「每 case 自适应分位数」（见 §4.7 Top-r）。
+
+**B. 分区是「逐 case 几何」的，需按 `gidx` 缓存**
+
+每个 case 有自己的网格（`data_np["cells"][0]`，stationary）。离线预处理须**对每个训练/测试 case 各算一份** `partition_cache_{split}_{gidx}.pt`，在线按 `graph.gidx` 取用。CylinderFlow 同一 case 的拓扑不随时间变化，故每 case 只算一次。
+
+**C. PyG 批处理时段 ID 需偏移**
+
+`PyGDataLoader(batch_size>1)` 会把多张图拼成一张大图并提供 `batch [N_total]` 向量。AMR 的 `kept_assign`、Transformer 的 token 必须**按图偏移**（图 b 的段 ID 加上前面所有图的段数），否则跨图节点会被错误聚到同一 token。`macro_transformer` 内需用 `batch` 做分组与 padding-mask。**M4 起 `batch_size=1` 跑通，再在 M5 支持 `batch_size>1`。**
+
+**D. `MeshGraphNet` 旁路 decoder 的落地决策**
+
+`MeshGraphNet.forward` = `edge_encoder → node_encoder → processor → node_decoder`。本工作要的是 `processor` 输出 `h_node [N,d]`。两条路径：
+- **(a) 推荐**：在 `micro_gnn.py` 内分别持有 `node_encoder/edge_encoder/processor`（可直接构造 `MeshGraphNet` 后引用其子模块 `.node_encoder/.edge_encoder/.processor`），forward 只走到 processor，跳过 `node_decoder`。语义清晰、与 M4GN「detach decoder」一致。
+- **(b) 备选**：构造时设 `output_dim=d`，把内置 `node_decoder` 当作首个投影层用，最终物理量预测交给 §4.9 统一 decoder。
+- **不确定点 U2**：需在 M4 写单测确认 `MeshGraphNet` 暴露的子模块属性名（`processor` 等）在当前版本稳定；若内部命名变动，退化为路径 (b)。
+
+### 7.3 各文件职责与接口（概览）
+
+| 文件 | 状态 | 输入 | 输出 | 关键依赖 |
+| --- | --- | --- | --- | --- |
+| `amr_m4gn/modal_decomp.py` | ✅ | edge_index, pos, node_type, cells, m=6 | f_md [N,6], eigvals | scipy.eigsh |
+| `amr_m4gn/segmentation.py` | ✅ | edge_index, pos, f_md, f_obs, K=[64,256], τ | levels=[L0,L1], seg_adj | pymetis/谱聚类 |
+| `amr_m4gn/pe.py` | ⬜ 新建 | seg_adj, steps=16 | rwse[K,16]（每层）| torch.sparse |
+| `amr_m4gn/physics_ops.py` | ⬜ 新建 | u,v,pos,edge_index,(u_prev) | {G,ω,M,S}[N] | torch_scatter |
+| `amr_m4gn/amr_router.py` | ⬜ 新建 | levels, phys, thresholds | kept_assign[N], depth[N], T | torch_scatter |
+| `amr_m4gn/micro_gnn.py` | ⬜ 新建 | x, edge_attr, graph | h_node [N,d] | MeshGraphNet |
+| `amr_m4gn/macro_transformer.py` | ⬜ 新建 | h_node, kept_assign, rwse, batch | h_cat [N,2d] | nn.Transformer |
+| `amr_m4gn/model.py` | ⬜ 新建 | PyG Data + 预处理缓存 | pred [N,3] | 上述全部 |
+| `preprocess_partitions.py` | ⬜ 新建 | data_dir, split, K_list, m | 写 partition_cache_*.pt | modal/seg/pe |
+| `data_amr.py`（或子类）| ⬜ 新建 | 同 VortexSheddingDataset | graph(+pos,+gidx,+缓存) | 见 §7.2-A |
+| `train_amr_m4gn.py` | ⬜ 新建 | config_amr_m4gn.yaml | checkpoint + 日志 | model, data_amr |
+| `inference_amr_m4gn.py` | ⬜ 新建 | checkpoint, test split | rollout + 评估指标 | model, data_amr |
+
+下面给出**逐文件详细规格**（函数签名、输入输出张量形状、前置数据、单元测试、不确定点）。
+
+### 7.4 逐文件详细规格
+
+#### 7.4.1 `amr_m4gn/pe.py`（新建）— 位置编码
+
+**职责**：段级 RWSE + 节点级绝对 PE。离线计算，写入缓存。
+
+```python
+def rwse_segment(seg_adj: Tensor[2, E_seg], num_segments: int,
+                 steps: int = 16) -> Tensor:   # → [num_segments, steps]
+    """段级随机游走结构编码：P=D⁻¹A_seg，返回 diag(P^1..P^steps)。"""
+
+def rwse_node(edge_index: Tensor[2, E], num_nodes: int,
+              steps: int = 16) -> Tensor:       # → [num_nodes, steps]
+    """节点级 RWSE（绝对 PE），注入 Encoder 输入（§4.4）。"""
+```
+
+- **输入来源**：`seg_adj` 来自 `segmentation.build_partition_tree` 已返回的 `segment_adjacency`；`edge_index` 来自 graph。
+- **输出**：写入缓存 `rwse_L0 [K0,16]`、`rwse_L1 [K1,16]`、`node_pe [N,16]`。
+- **单元测试**：(1) 链状 5 段图，验证端点段的回归概率 < 中间段；(2) 全连接 3 段，RWSE 应近似相等；(3) 数值检查 `P` 行和为 1。
+- **不确定点 U3**：节点级绝对 PE 是否真正提升精度，M4GN 消融显示「视情况」。**先实现接口、默认开启，在 M6 用 `w/o RWSE PE` 消融决定保留与否。**
+
+#### 7.4.2 `amr_m4gn/physics_ops.py`（新建）— N-S 物理量算子
+
+```python
+def lstsq_gradient(field: Tensor[N, C], pos: Tensor[N, 2],
+                   edge_index: Tensor[2, E]) -> Tensor:  # → [N, C, 2]
+    """1-ring 最小二乘梯度：每节点对邻居解 (ΔxᵀΔx)⁻¹ΔxᵀΔf。"""
+
+def compute_ns_quantities(u: Tensor[N], v: Tensor[N], pos: Tensor[N,2],
+                          edge_index, area: Tensor[N]=None, rho: float=1.0
+                          ) -> dict:   # {"G":[N],"omega":[N],"M":[N],"S":[N]}
+    """G=√(‖∇u‖²+‖∇v‖²); ω=∂v/∂x−∂u/∂y; M=ρ·|U|·area; S=∂u/∂y−∂v/∂x。"""
+
+def virtual_step(u_t, u_prev) -> Tensor:        # u' = u_t + (u_t − u_prev)
+    """前向欧拉虚拟速度场（§4.6），与当前场取并集触发细分。"""
+```
+
+- **输入来源**：`u,v` = `graph.x[:, :2]`（**注意：已归一化**）；`pos` = `graph.pos`（需 §7.2-A 改造）；`area` 可用 `modal_decomp.compute_node_area`。
+- **关键不确定点 U4（速度归一化对物理量的影响）**：`graph.x` 的速度是减均值除标准差后的值，直接算的 ω/G 是「归一化空间」的量，**不是真实涡量**。两种处理：
+  - (i) 用 `node_stats.json` 的 `velocity_mean/std` **反归一化**后再算物理量（物理正确，阈值有物理意义）；
+  - (ii) 直接在归一化空间算，把阈值也理解为归一化量（实现简单，但失去物理可解释性，与 PPT「物理驱动/可解释」诉求冲突）。
+  - **建议**：采用 (i)。在 `physics_ops` 入口接收 `vel_mean/vel_std` 反归一化。**最终方案需 M2 可视化对比两种 ω 场后定夺**——若 (ii) 的活跃区与 (i) 高度一致，可为简洁选 (ii)。
+- **单元测试**：(1) 解析场 `u=y, v=0` → ω=−1、S=1 全场常数，误差 < 5%（规则网格上）；(2) 旋转场 `u=−y,v=x` → ω=2；(3) 均匀流 `u=1,v=0` → G≈0；(4) 退化邻居（共线）时最小二乘加 ε·I 正则不崩。
+- **测试数据**：构造 20×20 规则三角网格 + 解析速度场（脚本内生成，不依赖数据集），对比解析梯度。
+
+#### 7.4.3 `amr_m4gn/amr_router.py`（新建）— 自适应 Token 路由
+
+```python
+def aggregate_per_segment(phys: dict, assign: Tensor[N],
+                          num_seg: int, reduce="max") -> dict:  # 每段 max|·|
+
+def sample_thresholds(ranges: dict, training: bool, fixed: dict=None) -> dict:
+    """训练随机采样；测试固定。ranges 见 §4.7。"""
+
+def route(levels: list, phys: dict, thresholds: dict
+          ) -> tuple:   # → (kept_assign[N], kept_depth[N], T:int, token_batch)
+    """L1 活跃段保留；平静段折回 L0 父段；返回连续 token id 与每 token 深度。"""
+```
+
+- **输入来源**：`levels=[L0_assign,L1_assign]`（缓存）；`phys` 来自 `physics_ops`；阈值来自 `sample_thresholds`。
+- **关键设计点**：需建立 `L1→L0` 父子映射（离线缓存 `l1_to_l0 [K1]`）。`route` 输出 `kept_assign[i]`∈[0,T) 为节点最终 token id，连续编号。
+- **单元测试**：(1) 全场 phys=0 → 全部折回 → T=K0=64；(2) 全场 phys 极大 → 全保留 → T=K1；(3) 半场活跃 → 64<T<256 且活跃区 token 来自 L1；(4) 阈值采样落在区间内、可复现（固定种子）。
+- **不确定点 U5（warm-up 时长）**：前若干 epoch 关闭 AMR（全用 L1）的时长需实验定。**M5 训练曲线决定**：若关 AMR 期间 loss 已平稳，则可早开 AMR。
+
+#### 7.4.4 `amr_m4gn/micro_gnn.py`（新建）— 局部 GNN（旁路 decoder）
+
+```python
+class MicroGNN(nn.Module):
+    def __init__(self, in_nodes=6, in_edges=3, hidden=128, processor_size=15,
+                 activation="silu", recompute_activation=True): ...
+    def forward(self, x, edge_attr, graph) -> Tensor:  # → h_node [N, hidden]
+        # 走 node_encoder/edge_encoder/processor，跳过 node_decoder（见 §7.2-D）
+```
+
+- **单元测试**：(1) 形状测试，N×6 + E×3 → N×128；(2) 与原 `MeshGraphNet` 前 processor 输出逐元素一致（同权重）；(3) 反向传播梯度非 NaN。
+- **不确定点 U2**：见 §7.2-D（子模块属性名稳定性）。
+
+#### 7.4.5 `amr_m4gn/macro_transformer.py`（新建）— 段编码 + Transformer + Dispatch
+
+```python
+class SegmentEncoder(nn.Module):      # mean-pool per token + PE_proj
+    def forward(self, h_node, kept_assign, T, rwse, depth, centroid
+                ) -> Tensor: ...      # → h_seg [T, d]
+
+class MacroTransformer(nn.Module):    # 4层×8头, Pre-LN, d=128, FFN=512
+    def forward(self, h_seg, key_padding_mask=None) -> Tensor: ...  # [T, d]
+
+def dispatch(h_seg_out, kept_assign, h_node) -> Tensor:  # → h_cat [N, 2d]
+```
+
+- **批处理**：`kept_assign` 与 `T` 需按 `graph.batch` 偏移；变长 batch 用 `key_padding_mask`（见 §7.2-C）。
+- **单元测试**：(1) mean-pool 置换不变性（打乱节点顺序输出不变）；(2) T=1 时退化为全局平均；(3) padding mask 正确屏蔽（被 mask 段不影响他段输出）；(4) dispatch 后 `h_cat[i, :d]==h_node[i]`。
+
+#### 7.4.6 `amr_m4gn/model.py`（新建）— 顶层模型
+
+```python
+class AMRM4GN(nn.Module):
+    def forward(self, graph, cache) -> Tensor:   # → pred [N, 3]
+        h_node = self.micro(graph.x, graph.edge_attr, graph)
+        phys   = compute_ns_quantities(...)             # 含虚拟步
+        kept_assign, depth, T = route(cache.levels, phys, thr)
+        h_seg  = self.seg_enc(h_node, kept_assign, T, cache.rwse, depth, ...)
+        h_seg  = self.macro(h_seg, mask)
+        h_cat  = dispatch(h_seg, kept_assign, h_node)
+        return self.decoder(h_cat)                      # MLP [2d→128→3]
+```
+
+- `cache` 为该 case 的预处理缓存（levels、rwse、l1_to_l0、centroid 等）。
+- **集成测试**：单 case 单步前向，输出 `[N,3]` 无 NaN；`loss.backward()` 全参数有梯度。
+
+### 7.5 离线预处理与缓存格式
+
+**`preprocess_partitions.py`（新建）**：对指定 split 的每个 case 跑「modal_decomp → segmentation(δ=1) → pe → l1_to_l0 映射 → 段质心」，写盘。
+
+```
+缓存文件：partition_cache_{split}_{gidx}.pt（dict）
+  ├── levels:      [L0_assign[N], L1_assign[N]]   (long)
+  ├── seg_adj:     [L0_adj, L1_adj]                (用于可视化/调试)
+  ├── rwse:        {"L0":[K0,16], "L1":[K1,16]}
+  ├── node_pe:     [N,16]
+  ├── l1_to_l0:    [K1]    (L1 段 → L0 父段)
+  ├── centroid:    {"L0":[K0,2], "L1":[K1,2]}     (段质心，供 PE)
+  ├── area:        [N]     (Voronoi 面积，供动量 M)
+  └── meta:        {K0,K1,m,tau,boundary_type,pos_min,pos_max}
+```
+
+- **CLI**：`python preprocess_partitions.py --data_dir ... --split train --K0 64 --K1 256 --num_cases 400`。
+- **耗时估算**：单 case 模态分解 ~1-3s + 分区 ~0.5s + PE ~0.2s ≈ 4s；400 case ≈ 27 min（一次性）。
+- **不确定点 U6（SLIC 速度）**：`slic_refinement` 当前是 Python 循环，~1900 节点可接受；扩到 EAGLE（数千节点）或 case 数大时需并行/Numba。**M7 前评估，必要时多进程预处理。**
+
+### 7.6 训练与推理入口改造
+
+- **`data_amr.py`**：`VortexSheddingDatasetAMR(VortexSheddingDataset)`，train 分支额外返回 `graph.pos`、`graph.gidx`；并在 `__init__` 按需加载/触发 `preprocess_partitions`（缺缓存则报错提示先跑预处理）。
+- **`train_amr_m4gn.py`**：复制 `train.py` 框架，替换 `MeshGraphNet` 为 `AMRM4GN`，`MSELoss` 替换为 per-channel NMSE（§4.9），前向时按 `graph.gidx` 取缓存。保留 DDP/AMP/checkpoint 逻辑。
+- **`inference_amr_m4gn.py`**：复制 `inference.py`，加入 rollout、§6.4 全部指标计算与可视化（速度/压力场、token 着色、误差累积曲线）。
+- **`conf/config_amr_m4gn.yaml`**：在原 `config.yaml` 基础上增 `K0/K1/num_modes/tau/processor_size/transformer{layers,heads,ffn}/amr_thresholds/warmup_epochs/loss=nmse` 等字段。
+
+### 7.7 测试策略总览
+
+| 层级 | 对象 | 方法 | 通过标准 |
+| --- | --- | --- | --- |
+| 单元测试 | 每个新文件核心函数 | `pytest`，解析场/合成图（见各 §7.4）| 数值误差 < 阈值、形状正确、可复现 |
+| 可视化校验 | 模态/分区/物理量/token | `visualize_partition.py` 扩展出图 | 肉眼符合物理直觉（见 §八验收）|
+| 集成测试 | `model.py` 前向+反向 | 单 case 单步 | 输出 [N,3] 无 NaN、全参有梯度 |
+| Overfit | 完整模型 | 单 case 多步训练 | loss 单调下降至接近 0，预测≈GT |
+| 回归对比 | vs MGN/X-MGN | 全量训练 | §6.4 指标，AMR-M4GN ≥ baseline |
+
+### 7.8 关键第三方依赖
 
 | 库 | 用途 | 安装 |
 | --- | --- | --- |
@@ -486,22 +667,87 @@ physicsnemo/examples/cfd/vortex_shedding_mgn/
 | `torch_geometric` / `torch_scatter` | 图结构、scatter 聚合 | 已有 |
 | `scipy` | 稀疏特征值 | 已有 |
 | `tfrecord` | 读 cylinder_flow TFRecord | `pip install tfrecord` |
+| `pytest` | 单元测试 | `pip install pytest` |
+
 
 ---
 
-## 八、研发里程碑
+## 八、研发里程碑（含进入/退出条件与决策门）
 
-| 里程碑 | 目标 | 交付物 | 工期 | 状态 |
-| --- | --- | --- | --- | --- |
-| **M1** 离线预处理 | 模态分解+分区合理 | modal_decomp+segmentation+可视化（6 图）| 3 天 | ✅ 已完成 |
-| **M2** 物理量算子 | G/ω/M/S 正确，能区分活跃/平静区 | physics_ops + 四标量场可视化 | 2 天 | ⬜ |
-| **M3** AMR Router | 二层 fold/keep 决策正确 | amr_router + 保留/合并可视化 + T 分布统计 | 2 天 | ⬜ |
-| **M4** 端到端跑通 | 单 case overfit 成功 | model+train_amr_m4gn+config + loss 下降曲线 | 3 天 | ⬜ |
-| **M5** 全量训练+对比 | 与 MGN/X-MGN 公平对比 | checkpoint + 对比表 + rollout 曲线 + token 统计 | 5 天 | ⬜ |
-| **M6** 消融 | 验证各模块贡献 | §6.5 八组消融表 + 分析报告 | 5 天 | ⬜ |
-| **M7** EAGLE 扩展（可选）| 大规模能力验证 | EAGLE reader + 大网格结果 | 5 天 | ⬜ |
+> 每个里程碑标注：**目标 / 新增改动文件 / 配合数据 / 验收（退出）标准 / 决策门**。「决策门」= 必须看到某类结果（训练曲线、可视化）才能决定下一步的点。
 
-**主线总工期**：约 20 工作日（4 周）；含 EAGLE 扩展约 5 周。
+### M1 — 离线预处理（✅ 已完成）
+
+- **改动**：`modal_decomp.py`、`segmentation.py`、`visualize_partition.py`。
+- **数据**：1 个 test case（`raw_dataset/cylinder_flow`）。
+- **退出标准**：6 张诊断图合理（模态非死模、分区连通、尾迹/来流分到不同段）。
+
+### M2 — 物理量算子（2 天）
+
+- **目标**：`physics_ops.py` 正确计算 G/ω/M/S，能区分活跃区与平静区。
+- **新增**：`amr_m4gn/physics_ops.py`；扩展 `visualize_partition.py` 出四标量场图。
+- **配合数据**：(a) 合成 20×20 规则网格 + 解析速度场（单元测试）；(b) 1 个 cylinder case 的某时间步真实速度场（可视化）。
+- **退出标准**：解析场单测误差 < 5%；可视化中圆柱后方涡街 ω 显著高于来流区。
+- **🚩 决策门 D1（速度归一化处理，U4）**：对比「反归一化后算 ω」vs「归一化空间算 ω」两张图。**若两者活跃区高度一致** → 选实现更简单的归一化空间方案；**否则**必须反归一化（物理可解释）。此决定影响 `physics_ops` 与 `amr_router` 的阈值语义，**必须在 M3 前定**。
+- **🚩 决策门 D2（坐标系，U1）**：打印各 case `pos.min/max`。若尺度不一 → AMR 阈值改用 Top-r 分位（§4.7）而非绝对值。
+
+### M3 — AMR Router（2 天）
+
+- **目标**：二层 fold/keep 决策正确，T 随物理状态变化。
+- **新增**：`amr_m4gn/amr_router.py`、`amr_m4gn/pe.py`；可视化「保留/合并」着色图。
+- **配合数据**：M2 的真实涡街场 + 缓存的 `levels`、`l1_to_l0`。
+- **退出标准**：单测四例全过（全平静→T=64；全活跃→T=256；半场→中间值；阈值可复现）；可视化中尾迹保细、来流被合并。
+- **🚩 决策门 D3（K0/K1 取值）**：观察 T 分布。若 T 长期贴近 256（几乎不合并）→ 说明阈值过松或 K1 过大，需调 K1 或阈值区间；若长期贴近 64 → 阈值过严。**需此统计才能定最终 K0/K1 与阈值区间。**
+
+### M4 — 端到端跑通（3 天）
+
+- **目标**：完整模型在**单个 case** 上 overfit 成功。
+- **新增**：`micro_gnn.py`、`macro_transformer.py`、`model.py`、`data_amr.py`、`preprocess_partitions.py`、`train_amr_m4gn.py`、`conf/config_amr_m4gn.yaml`。
+- **配合数据**：1 个 case 全时间步 + 其 `partition_cache`。
+- **退出标准**：(1) 集成测试无 NaN、全参有梯度；(2) overfit 单 case：loss 单调降至接近 0，预测场≈GT（可视化）。
+- **🚩 决策门 D4（micro_gnn 接口，U2）**：M4 第一步先写 `micro_gnn` 单测确认 `MeshGraphNet` 子模块属性稳定。**通过则用路径 (a)；否则退路径 (b)**（§7.2-D）。
+- **🚩 决策门 D5（数据管线方案，U1/§7.2-A）**：确认采用 P1（子类暴露 pos）还是 P2（反归一化）。**推荐 P1，M4 开工即定。**
+- **前置约束**：本里程碑 `batch_size=1`，暂不处理批内段偏移（留 M5）。
+
+### M5 — 全量训练 + 对比（5 天）
+
+- **目标**：与 MGN、X-MGN baseline 公平对比。
+- **新增改动**：`macro_transformer` 支持 `batch_size>1`（批内段偏移 + padding mask，§7.2-C）；`inference_amr_m4gn.py`（rollout + §6.4 指标）。
+- **配合数据**：全量 train（`num_training_samples` cases）+ test split + 全部缓存。
+- **退出标准**：训练收敛；对比表（NMSE/MAE/单步&多步 RMSE/FLOPs/GPU 时间/显存峰值）；rollout 误差曲线；token 数统计。
+- **🚩 决策门 D6（AMR warm-up 时长，U5）**：根据「关 AMR 阶段」loss 曲线决定何时开 AMR。
+- **🚩 决策门 D7（是否达预期）**：若 AMR-M4GN 长程指标未超 MGN → 排查 Transformer 是否真起作用（查注意力权重是否非平凡），据此决定是否调整段粒度/PE/损失权重。**此为整个课题的关键验证点。**
+
+### M6 — 消融实验（5 天）
+
+- **目标**：验证各模块贡献。
+- **改动**：在 `config_amr_m4gn.yaml` 加开关（`use_amr/use_transformer/use_modal/use_rwse/use_overlap/use_virtual_step/processor_size`），无需大改代码。
+- **配合数据**：全量数据，复用 M5 流程。
+- **退出标准**：§6.5 八组消融表 + 分析；明确各模块净贡献。
+- **🚩 决策门 D8（裁剪）**：根据消融结果，对净贡献为负/可忽略的模块（如 RWSE、虚拟步）在最终模型中关闭，简化架构。
+
+### M7 — EAGLE 大规模扩展（可选，5 天）
+
+- **目标**：大规模湍流能力验证。
+- **新增**：EAGLE 数据 reader（区别于 TFRecord）；预处理并行化（U6）。
+- **配合数据**：EAGLE 子集（先少量场景验证管线，再扩量）。
+- **退出标准**：在 EAGLE 上跑通并与 MGN/X-MGN 对比；展示 AMR token 节省与长程优势。
+- **🚩 决策门 D9（扩展性瓶颈）**：若单图过大致显存不足 → 评估是否引入 X-MGN 式 Halo 分块（§十一-2，与本架构正交）。
+
+**主线总工期**：约 20 工作日（M1–M6，4 周）；含 EAGLE 扩展约 5 周。
+
+### 8.1 可视化验收清单（肉眼判断，沿用并扩展 M1）
+
+| 图 | 内容 | 合格判据 |
+| --- | --- | --- |
+| 模态图 | 前 6 个 Laplacian 模 | 无死模；中频在圆柱/尾迹有结构 |
+| 分区图 | L0(64)/L1(256) 着色 + 段邻接 | 同色连通；圆柱附近段更密 |
+| 物理量图 | G/ω/M/S 四标量场 | 尾迹 ω 高、壁面 G 高 |
+| Token 图 | AMR 保留/合并着色 | 尾迹保细、来流合并 |
+| 预测对比图 | pred vs GT 的 u/v/p | overfit 后近乎一致 |
+| 误差曲线 | rollout RMSE vs 步数 | AMR-M4GN 增长慢于 MGN |
+| 注意力图（可选）| 段级注意力权重 | 关注气流/尾迹（呼应 EAGLE）|
+
 
 ---
 

@@ -134,7 +134,11 @@ def plot_mesh(pos, cells, node_type, save_path):
     # Color nodes by type
     unique_types = np.unique(node_type)
     colors = cm.tab10(np.linspace(0, 1, len(unique_types)))
-    type_names = {0: "Fluid", 4: "Inlet", 5: "Cylinder", 6: "Outlet", 9: "Wall"}
+    # DeepMind MeshGraphNet NodeType convention (common.py):
+    #   0=NORMAL(fluid), 1=OBSTACLE, 4=INFLOW, 5=OUTFLOW, 6=WALL_BOUNDARY.
+    # In cylinder_flow the cylinder surface and channel walls are both type 6.
+    type_names = {0: "Fluid", 1: "Obstacle", 4: "Inflow", 5: "Outflow",
+                  6: "Wall/Cylinder", 9: "Wall"}
     
     for idx, t in enumerate(unique_types):
         mask = node_type == t
@@ -359,6 +363,11 @@ def main():
     print(f"  Nodes: {num_nodes}, Cells: {cells.shape[0]}, "
           f"Edges: {edge_index.shape[1]}")
     print(f"  Node types: {dict(zip(*np.unique(node_type, return_counts=True)))}")
+    # Print coordinate range (design doc decision gate D2 / uncertainty U1):
+    # confirms whether different cases share a coordinate system / scale, which
+    # determines if AMR thresholds can be absolute or must be per-case Top-r.
+    print(f"  pos x-range: [{pos[:, 0].min():.4f}, {pos[:, 0].max():.4f}], "
+          f"y-range: [{pos[:, 1].min():.4f}, {pos[:, 1].max():.4f}]")
     
     # ---- Plot mesh ----
     print(f"\n[2/6] Plotting mesh structure...")
@@ -387,17 +396,20 @@ def main():
     
     # ---- Obstacle distance ----
     print(f"\n[4/6] Computing obstacle distance field...")
-    # Try different obstacle type IDs (dataset-dependent)
+    # Probe wall/obstacle node types in priority order:
+    #   6 = WALL_BOUNDARY (cylinder + channel walls, the usual case),
+    #   1 = OBSTACLE (some datasets). NOTE: 5 is OUTFLOW, 4 is INFLOW -> NOT walls.
     f_obs = None
-    for obs_id in [5, 4, 3, 6]:
+    for obs_id in [6, 1]:
         if np.any(node_type == obs_id):
             f_obs = compute_obstacle_distance(pos, node_type, obstacle_type_id=obs_id)
-            print(f"  Found obstacle nodes with type={obs_id} "
-                  f"(count={np.sum(node_type == obs_id)})")
+            print(f"  Found wall/obstacle nodes with type={obs_id} "
+                  f"(count={np.sum(node_type == obs_id)}). "
+                  f"NOTE: cylinder & channel walls share type 6 (uncertainty U1).")
             break
-    
+
     if f_obs is None:
-        print("  No obstacle nodes found. Using distance to mesh center as f_obs.")
+        print("  No wall/obstacle nodes found. Using distance to mesh center as f_obs.")
         center = pos.mean(axis=0)
         f_obs = np.linalg.norm(pos - center, axis=1)
     

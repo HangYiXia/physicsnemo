@@ -549,26 +549,39 @@ def _build_segment_adjacency(edge_index, assign):
 # Utility: Compute obstacle distance
 # ============================================================================
 
-def compute_obstacle_distance(pos, node_type, obstacle_type_id=5):
+def compute_obstacle_distance(pos, node_type, obstacle_type_id=6):
     """
-    Compute signed distance from each node to the nearest obstacle node.
-    
-    For vortex_shedding: obstacle nodes are the cylinder surface
-    (node_type == 5 in the raw dataset, before one-hot encoding).
-    
+    Compute (unsigned) distance from each node to the nearest solid-wall node.
+
+    DeepMind MeshGraphNet NodeType convention (common.py):
+        0=NORMAL(fluid), 1=OBSTACLE, 2=AIRFOIL, 3=HANDLE,
+        4=INFLOW, 5=OUTFLOW, 6=WALL_BOUNDARY.
+    For cylinder_flow / vortex_shedding the raw node types observed are
+    {0, 4, 5, 6}; the cylinder surface AND the top/bottom channel walls are
+    both WALL_BOUNDARY == 6 (consistent with the dataset's _one_hot_encode that
+    maps 4/5/6 -> 1/2/3 with num_classes=4). Therefore the obstacle/wall id is
+    6, NOT 5 (5 is the OUTFLOW outlet).
+
+    Caveat (uncertainty U1, see design doc 4.3/7.2-A): node_type alone cannot
+    separate the cylinder from the outer channel walls (both are 6). Using all
+    type-6 nodes yields a "distance to nearest solid wall" field, which is still
+    a sensible SLIC feature (boundary layers near any wall deserve finer
+    segments). If a cylinder-only distance is required later, isolate the
+    type-6 cluster that is NOT on the domain bounding box (geometric filter).
+
     Parameters
     ----------
     pos : ndarray [N, 2]
         Node positions
     node_type : ndarray [N]
-        Raw integer node type (0=fluid, 5=cylinder wall, etc.)
+        Raw integer node type (0=fluid, 4=inflow, 5=outflow, 6=wall/cylinder)
     obstacle_type_id : int
-        Which node_type corresponds to the obstacle (default 5)
-    
+        Which node_type corresponds to the wall/obstacle (default 6 = WALL_BOUNDARY)
+
     Returns
     -------
     f_obs : ndarray [N]
-        Distance to nearest obstacle node (always >= 0)
+        Distance to nearest wall/obstacle node (always >= 0)
     """
     pos_np = np.asarray(pos)
     nt = np.asarray(node_type).flatten()
