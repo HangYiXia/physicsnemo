@@ -1,0 +1,54 @@
+[log] Console output is also saved to: C:\GitHub\physicsnemo\examples\cfd\vortex_shedding_mgn\partition_vis\case99\run_log_case99_t300.txt
+======================================================================
+AMR-M4GN Preprocessing Visualization
+======================================================================
+
+[1/6] Loading case 99 (timestep 300) from ./raw_dataset/cylinder_flow/cylinder_flow (test)...
+  Nodes: 1976, Cells: 3718, Edges: 11388
+  Node types: {np.int32(0): np.int64(1742), np.int32(4): np.int64(17), np.int32(5): np.int64(17), np.int32(6): np.int64(200)}
+  pos x-range: [0.0000, 1.6000], y-range: [0.0000, 0.4100]
+
+[2/6] Plotting mesh structure...
+  Saved: ./partition_vis\case99\01_mesh.png
+  Saved: ./partition_vis\case99\02_velocity.png
+
+[3/6] Computing Laplacian eigenmodes (m=6)...
+  Eigenvalues: [3.3009648e-05 3.8617043e+00 1.5208611e+01 3.4015179e+01 5.7438465e+01
+ 6.0875168e+01]
+  Saved: ./partition_vis\case99\03_eigenmodes.png
+
+[4/6] Computing obstacle distance field...
+  Found wall/obstacle nodes with type=6 (count=200). NOTE: cylinder & channel walls share type 6 (uncertainty U1).
+  Saved: ./partition_vis\case99\04_obstacle_dist.png
+
+[4b] Computing AMR physical indicators (G/omega/M/S)...
+  G    : min=3.066e-02, max=9.647e+01, |.|p99=6.324e+01
+  omega: min=-9.422e+01, max=1.027e+02, |.|p99=6.847e+01
+  M    : min=4.494e-21, max=9.653e-04, |.|p99=8.424e-04
+  S    : min=4.336e-02, max=9.392e+01, |.|p99=5.692e+01
+  Saved: ./partition_vis\case99\07_physics_fields.png
+
+[5/6] Building partition tree (K0=64, K1=256, tau=1.0)...
+  Level 0: 64 segments (target 64)
+  Level 1: 256 segments (target 256)
+  L0 adjacency edges: 150
+  L1 adjacency edges: 691
+
+[6/6] Plotting partitions...
+  Saved: ./partition_vis\case99\05_partition_L0.png
+  Saved: ./partition_vis\case99\06_partition_L1.png
+
+  Cached partition data to: ./partition_vis\case99\partition_cache.pt
+
+======================================================================
+SUMMARY
+======================================================================
+  Mesh:           1976 nodes, 3718 triangles
+  Eigenmodes:     6 modes, λ_1..λ_m = [0.0000, ..., 60.8752]
+  Partition L0:   64 segments
+  Partition L1:   256 segments
+  AMR token range: [64, 256]
+  Output dir:     C:\GitHub\physicsnemo\examples\cfd\vortex_shedding_mgn\partition_vis\case99
+
+All visualizations saved. Check the output directory.
+======================================================================
