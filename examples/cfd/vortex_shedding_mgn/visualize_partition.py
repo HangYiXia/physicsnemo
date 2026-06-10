@@ -42,6 +42,7 @@ from amr_m4gn.segmentation import (
     compute_obstacle_distance,
     hybrid_segmentation,
 )
+from amr_m4gn.physics_ops import compute_ns_quantities
 
 
 def load_single_case(data_dir, split="test", case_idx=0):
@@ -213,6 +214,43 @@ def plot_obstacle_distance(pos, cells, f_obs, save_path):
     print(f"  Saved: {save_path}")
 
 
+def plot_physics_fields(pos, cells, quantities, save_path):
+    """Plot the four AMR physical indicators G / omega / M / S on the mesh.
+
+    Diverging colormap (symmetric about 0) for omega & S; sequential for G & M.
+    """
+    triang = tri.Triangulation(pos[:, 0], pos[:, 1], cells)
+
+    specs = [
+        ("G",     "Velocity-gradient |grad U|",       "viridis", False),
+        ("omega", "Vorticity  dv/dx - du/dy",         "RdBu_r",  True),
+        ("M",     "Momentum  rho |U| area",           "viridis", False),
+        ("S",     "KH shear  du/dy - dv/dx",          "RdBu_r",  True),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(18, 8))
+    for ax, (key, title, cmap, diverging) in zip(axes.flat, specs):
+        field = np.asarray(quantities[key])
+        if diverging:
+            vmax = np.percentile(np.abs(field), 99) + 1e-12
+            tc = ax.tripcolor(triang, field, cmap=cmap, shading='gouraud',
+                              vmin=-vmax, vmax=vmax)
+        else:
+            vmax = np.percentile(field, 99) + 1e-12
+            tc = ax.tripcolor(triang, field, cmap=cmap, shading='gouraud',
+                              vmin=0, vmax=vmax)
+        ax.set_aspect('equal')
+        ax.set_title(title)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        fig.colorbar(tc, ax=ax, fraction=0.046, pad=0.04)
+
+    fig.suptitle("AMR Physical Indicators (M2)", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
 def plot_partition(pos, cells, assign, level_name, num_segments, save_path,
                    seg_adjacency=None):
     """Plot mesh colored by segment assignment."""
@@ -340,6 +378,11 @@ def main():
         choices=["neumann", "dirichlet"],
         help="Boundary condition type for Laplacian (default: neumann)"
     )
+    parser.add_argument(
+        "--plot_physics", action="store_true", default=False,
+        help="Also compute & plot the four AMR physical indicators G/omega/M/S "
+             "(M2). Uses PHYSICAL velocity from TFRecord (no denormalization)."
+    )
     args = parser.parse_args()
     
     # Create output directory
@@ -415,7 +458,25 @@ def main():
     
     plot_obstacle_distance(pos, cells, f_obs,
                            os.path.join(args.output_dir, "04_obstacle_dist.png"))
-    
+
+    # ---- AMR physical indicators (M2, optional) ----
+    if args.plot_physics:
+        print(f"\n[4b] Computing AMR physical indicators (G/omega/M/S)...")
+        # velocity from load_single_case is PHYSICAL (raw TFRecord) -> no denorm.
+        area = compute_node_area(pos, cells, num_nodes)
+        quantities = compute_ns_quantities(
+            u=velocity[:, 0], v=velocity[:, 1],
+            pos=pos, edge_index=edge_index, area=area,
+        )
+        # Print magnitudes for decision gate D1 (physical scale sanity check).
+        for k in ["G", "omega", "M", "S"]:
+            arr = quantities[k].numpy()
+            print(f"  {k:5s}: min={arr.min():.3e}, max={arr.max():.3e}, "
+                  f"|.|p99={np.percentile(np.abs(arr), 99):.3e}")
+        plot_physics_fields(
+            pos, cells, {k: v.numpy() for k, v in quantities.items()},
+            os.path.join(args.output_dir, "07_physics_fields.png"))
+
     # ---- Build partition tree ----
     print(f"\n[5/6] Building partition tree (K0={args.K0}, K1={args.K1}, tau={args.tau})...")
     partition_levels, segment_adjacency = build_partition_tree(
