@@ -2,12 +2,12 @@
 
 **更新日期**：2026年6月10日
 **当前阶段**：M2 — N-S 物理量算子（G/ω/M/S + 1-ring 最小二乘梯度 + 虚拟步）+ 四标量场可视化
-**M2 状态**：⚠️ **代码已实现，但尚未经你实跑测试通过**（pytest 与发展态可视化都还没跑）。下文 `✅` 仅表示「文件已新建/修改」，**不代表已验证**。M2 能否关闭取决于 §七 验收由你实跑达成。
+**M2 状态**：⚠️ **代码已实现，可视化已用真实 t=300 数据（4 case）确认物理形态/量级正确，但尚未判定完成**——更新版 pytest（解析场精确值）、标签正确的 S 图、终端无告警这三项还没实跑确认。下文凡涉及「测试通过/闭环」的，除非注明是你实跑的真实数据，否则视为「待重跑确认」。
 **前置**：M1 已由你实跑 4 个 case 验证关闭（环境、数据集下载、`visualize_partition.py` 基础用法见 `AMR_M4GN_Progress_M1.md`，本文不重复）
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§4.6 / §7.4.2 / §八 M2）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
 
-> 本文只讲 M2 新增的东西：做了什么、为什么、怎么跑怎么验、决策门 D1 怎么拍板、M3 注意事项。M1 已覆盖的（装环境、下数据集）只引用不重写。
+> 本文只讲 M2 新增的东西：做了什么、为什么、怎么跑怎么验、决策门 D1 怎么暂定、实测发现的「t=0 无尾迹」与「S 由 KH 剪切改为应变率幅值」两件事的处置、M2 能否判定完成、M3 注意事项。M1 已覆盖的（装环境、下数据集）只引用不重写。
 
 ---
 
@@ -18,7 +18,7 @@ examples/cfd/vortex_shedding_mgn/
 ├── amr_m4gn/
 │   ├── __init__.py             ✅ 改：导出 physics_ops 的 4 个函数
 │   └── physics_ops.py          ✅ 新建：G/ω/M/S + 最小二乘梯度 + 虚拟步 + 反归一化
-├── visualize_partition.py      ✅ 改：加 --plot_physics，多出 07_physics_fields.png
+├── visualize_partition.py      ✅ 改：加 --plot_physics + --timestep + 终端日志落盘
 └── tests/
     └── test_physics_ops.py     ✅ 新建：8 个 pytest 单测（解析场验证）
 ```
@@ -40,35 +40,30 @@ M2 目标（Design Doc §八 M2）：**算对 4 个物理判据，能区分活�
 | `virtual_step` | `(uv_t[N,2], uv_prev[N,2]或None) -> uv'[N,2]` | 前向欧拉 `uv'=uv_t+(uv_t−uv_prev)`（AMR-Transformer Eq.11）|
 | `denormalize_velocity` | `(u, v, vel_mean[2], vel_std[2]) -> (u_phys, v_phys)` | 训练期把归一化速度还原为物理量（D1）|
 
-**四个判据公式（与 Design Doc §4.6 一致）**：
+**四个判据公式（与 Design Doc §4.6 / AMR-Transformer 严格一致）**：
 - `G = √(du_dx² + du_dy² + dv_dx² + dv_dy²)` —— 速度梯度幅值（间断/急变）
-- `omega = dv/dx − du/dy` —— 涡量（速度梯度的**反对称**部分，旋转）
-- `S = √(2·du_dx² + 2·dv_dy² + (du_dy+dv_dx)²)` —— 应变率幅值 √(2·S_ij·S_ij)（**对称**部分，剪切/拉伸）
+- `omega = dv/dx − du/dy` —— 涡量（旋转强度）
+- `S = √(2·du_dx² + 2·dv_dy² + (du_dy+dv_dx)²)` —— 应变率幅值 √(2·S_ij·S_ij)（速度梯度对称部分；**已替代**设计稿原文的 `∂u/∂y−∂v/∂x`，因为后者恒等于 −ω 导致冗余，见 §五.2）
 - `M = ρ·|U|·area` —— 动量指示量（`area` 来自 M1 的 `compute_node_area`）
-
-> **⚠️ S 定义已修正（vs AMR-Transformer 原文）**：原文 `S=∂u/∂y−∂v/∂x` **恒等于 −ω**，Router 取 |·| 后与涡量完全冗余，4 判据塌成 3。改用应变率幅值 `√(2·S_ij·S_ij)`（速度梯度对称部分），与 ω 严格独立且恒 ≥ 0。验证：纯剪切 `u=y` → ω=−1、S=1（区分开）；刚体旋转 `u=−y,v=x` → ω=2、S=0（应变为零）。
 
 **关键设计决策（为什么这么做）**：
 
-1. **为什么用 1-ring 最小二乘而非差分**：非结构三角网格没有规则 stencil，AMR-Transformer 原文的四叉树差分用不了。最小二乘对每个节点解 `(ΣΔxΔxᵀ)∇f=(ΣΔxΔf)`，是任意非结构网格上的标准一致梯度估计，且**对线性场精确**（见 §四 验证误差 1e-6）。
+1. **为什么用 1-ring 最小二乘而非差分**：非结构三角网格没有规则 stencil，AMR-Transformer 原文的四叉树差分用不了。最小二乘对每个节点解 `(ΣΔxΔxᵀ)∇f=(ΣΔxΔf)`，是任意非结构网格上的标准一致梯度估计，对线性场理论上精确（离线 numpy 校验误差 1e-5 量级，仓库代码的 pytest 待重跑）。
 2. **为什么加 `eps·I` 正则**：边界/角点邻居少或共线时，2×2 法矩阵奇异；正则保证 `torch.linalg.solve` 不出 NaN（单测 `test_no_nan_tiny_graph` 覆盖）。
 3. **为什么用 `index_add_` 而非 torch_scatter**：`index_add_` 是 torch 核心算子，零额外依赖，按节点聚合每条边的外积贡献，等价 scatter-add。
-4. **为什么留 `vel_mean/vel_std` 参数（D1 核心）**：可视化用的是物理速度（直读 TFRecord），但**训练时 `graph.x[:,:2]` 是归一化的**；归一化空间算出的 ω 无物理意义、阈值不可解释。训练期须传 `node_stats.json` 的均值/方差先反归一化。详见 §五。
+4. **为什么留 `vel_mean/vel_std` 参数（D1 核心）**：可视化用的是物理速度（直读 TFRecord），但**训练时 `graph.x[:,:2]` 是归一化的**；归一化空间算出的 ω 无物理意义、阈值不可解释。训练期须传 `node_stats.json` 的均值/方差先反归一化。**D1 暂定：训练期反归一化（见 §5.1，依据真实量级数据，但尚未在发展态全面确认）**。
 
 ---
 
 ## 三、`visualize_partition.py` 的改动
 
-- 新增 `--plot_physics` 开关（**默认关，不影响 M1 既有 6 图流程**）。
-- 新增 `--timestep` 参数（默认 0）：选轨迹的哪一帧取速度场。**t=0 是未发展的初始流，没有涡街**；要看 Kármán 脱涡须用后期帧（如 `--timestep 300`）。网格几何是静态的，pos/cells/node_type 与时间无关。
-- `--plot_physics` 开启后：`compute_node_area` 算面积 → `compute_ns_quantities`（物理速度，无需反归一化）→ 出 `07_physics_fields.png`（2×2：G/ω/M/S）；终端打印每个量的 `min/max/|·|p99`。
-- 配色：ω 用对称发散色标 `RdBu_r`（有正负号）；G/M/S 恒 ≥ 0 用 `viridis`；均按 p99 截断防离群值压扁色阶。
-- **已实现 2 个 M1 遗留告警的修复（尚未实跑确认）**：① `modal_decomp` 把 L、M 统一转 float64，意图消除 ARPACK `M does not have the same type precision` 告警；② 分区配色改用 `matplotlib.colormaps[name].resampled(K)`，意图消除 `get_cmap` 弃用告警。**这两处改动你还没重跑过，是否真的消除告警需你重跑确认。**
-- **新增「按 case_idx 分文件夹保存」**：所有产物（6+1 张图、`partition_cache.pt`、日志 txt）改存到 `<output_dir>/case<case_idx>/` 子目录（如 `partition_vis/case0/`、`partition_vis/case50/`）。这样不同 `--case_idx` 的运行**不再互相覆盖**，可同时保留多个 case 的结果。
-- **新增「终端输出保存为纯文本」功能**（方便你在另一台机器跑完后直接把日志文件发我，免去复制粘贴）：
-  - 默认开启：所有 `print` 内容在显示到终端的同时，写入 `<output_dir>/case<case_idx>/run_log_case<case_idx>_t<timestep>.txt`（如 `partition_vis/case0/run_log_case0_t300.txt`）。
-  - 实现方式：一个 `_Tee` 类把 `sys.stdout` 同时指向真实终端和日志文件，每次写入即 flush（**脚本中途崩溃也能留下已产生的日志**），并用 `atexit` 保证退出时关闭文件。
-  - 新参数：`--log_file <路径>` 自定义日志文件名/位置；`--no_log` 关闭该功能。
+- **`--plot_physics`** 开关（默认关，**不影响 M1 既有 6 图流程**）。开启后多出 `07_physics_fields.png`（2×2：G/ω/M/S）+ 终端打印 `min/max/|·|p99`。
+- **`--timestep`** 开关（默认 0）。**重要**：t=0 是初始未发展流，**没有 Kármán 涡街**；想看脱涡尾迹必须加 `--timestep 300` 或更晚。
+- **终端日志落盘**：默认写 `partition_vis/run_log_case<idx>_t<t>.txt`，便于多 case 跑完回查（见 §六 实测表是怎么得到的）。
+- 配色：ω 用对称发散色标 `RdBu_r`（有正负号）；G、M、S 恒 ≥ 0 用 `viridis`；均按 p99 截断，防离群值压扁色阶。
+  > **绘图 spec 修正（你已跑出的图里 S 还是旧标签）**：你产出的 `07_physics_fields.png` 中 S 子图标题仍是「KH shear du/dy−dv/dx」且用了发散色标——那是 `plot_physics_fields` 的绘图 spec 没跟着 S 公式一起改。**S 的数值已是新的应变率幅值（日志 `S min=0.169≥0` 可证）**，只是标题/色标画错。现已改为标题「Strain-rate sqrt(2 S_ij S_ij)」+ `viridis`。**需重跑才能得到标签正确的 S 图。**
+
+> ⚠️ 已知小遗留：`02_velocity.png` 标题硬编码 `(timestep 0)`，与 `--timestep` 不联动。M3 顺手修。
 
 ---
 
@@ -76,115 +71,132 @@ M2 目标（Design Doc §八 M2）：**算对 4 个物理判据，能区分活�
 
 对应 Design Doc **§7.4.2**。在**规则三角网格 + 解析速度场**上验证，**不依赖数据集**。
 
-| 测试 | 场 | 期望 | 容差 |
-| --- | --- | --- | --- |
-| `test_linear_gradient_exact` | f=3x+2y | ∇f=(3,2) | <1e-3 |
-| `test_shear_flow_vorticity` | u=y,v=0 | ω=−1, **S=1**, G=1（ω≠S，验证独立）| <5e-2 |
-| `test_rotation_vorticity` | u=−y,v=x | ω=2, **S=0**（纯旋转无应变）| <5e-2 |
-| `test_uniform_flow_zero_gradient` | u=1,v=0 | G≈ω≈S≈0 | <1e-3 |
-| `test_momentum_indicator` | u=3,v=4,area=1 | M=5 | <1e-4 |
-| `test_denormalize_velocity` | — | phys=norm·std+mean | 精确 |
-| `test_virtual_step` | — | uv+(uv−prev) | 精确 |
-| `test_no_nan_tiny_graph` | 3 节点退化图 | 全有限 | — |
+| 测试 | 场 | 期望 | 容差 | 状态 |
+| --- | --- | --- | --- | --- |
+| `test_linear_gradient_exact` | f=3x+2y | ∇f=(3,2) | <1e-3 | ⏳ 待重跑 |
+| `test_shear_flow_vorticity` | u=y,v=0 | ω=−1, **S=1**, G=1（ω≠S，证独立）| <5e-2 | ⏳ 待重跑 |
+| `test_rotation_vorticity` | u=−y,v=x | ω=2, **S=0**（纯旋转无应变）| <5e-2 | ⏳ 待重跑 |
+| `test_uniform_flow_zero_gradient` | u=1,v=0 | G≈ω≈S≈0 | <1e-3 | ⏳ 待重跑 |
+| `test_momentum_indicator` | u=3,v=4,area=1 | M=5 | <1e-4 | ⏳ 待重跑 |
+| `test_denormalize_velocity` | — | phys=norm·std+mean | 精确 | ⏳ 待重跑 |
+| `test_virtual_step` | — | uv+(uv−prev) | 精确 | ⏳ 待重跑 |
+| `test_no_nan_tiny_graph` | 3 节点退化图 | 全有限 | — | ⏳ 待重跑 |
 
-**关于验证程度（请注意区分）**：
-- 我只在开发机用**纯 numpy 复刻了梯度/应变公式**做离线数学校验（**不是仓库的 torch 代码，也不是 pytest**），结果：linear 1.08e-5、shear ω=−1/S=1/G=1（误差 1e-6）、rotation ω=2/S=0（误差<2e-6）。这只能说明**公式推导对**。
-- 仓库里 `physics_ops.py`（torch 版）与更新后的 `test_physics_ops.py` **尚未实跑 pytest**（开发机 `base` Python 无 torch）。
-- 因此现状是「**已实现，未经实跑测试**」。需你在装好 torch 的环境跑 `pytest` 后才能确认是否真的全过。
-- 你上一轮跑过的 8/8 PASS 是**改 S 公式之前**的版本；本轮改了 S 公式与 2 个测试，**必须重跑**。
+> ⚠️ **测试期望已随新 S 更新**（shear S=1、rotation S=0）。你之前看到的「8 passed in 1.30s」是**改 S 公式之前**的旧版本结果，对新测试**无效**。新版 pytest 尚未实跑确认，全部标「待重跑」。我只用纯 numpy 离线复刻校验过公式（非仓库 torch 代码、非 pytest）。
 
 ---
 
-## 五、🚩 决策门 D1：物理量是否反归一化（暂定，未最终确认）
+## 五、🚩 实测发现的两件关键事（一定看）
 
-**问题**：训练时 `u,v` 归一化，算物理量前要不要用 `node_stats.json` 反归一化？
+### 5.1 决策门 D1（暂定，未最终确认）：训练期反归一化
 
-**已有的真实数据（你上一轮 4 个 case 的实测，t=0）**：`|ω|p99` = case0 359、case1 253、case50 360、case99 142 /s；与边界层涡量估计 `ω~U/δ≈1.5/0.004≈375 /s` 同数量级，跨 case 同量级。**这些是你实跑出来的真实数字。**
+**问题**：训练时 `u,v` 归一化到 mean-0/std-1，算物理量前要不要用 `node_stats.json` 反归一化？
 
-**暂定结论（尚未最终确认）**：倾向**训练期反归一化**（`compute_ns_quantities` 传 `vel_mean/vel_std`）。理由：① D2 倾向用绝对阈值，前提是物理量纲一致、跨 case 可比；② 归一化把 u、v 各自缩放到不同尺度，会扭曲 ω 的相对大小。
+**实测证据**（4 case，物理速度，**t=300，见 §六 表，这些是你实跑的真实数字**）：
+- `|ω|p99 ∈ [68, 208] /s`，跨 case 同数量级（浮动约 3×）
+- 量级与 Re=100 圆柱绕流的边界层涡量预期同阶：BL 内 `ω ~ U/δ`，`U≈1.5 m/s`、`δ ~ D/√Re ≈ 0.004 m` → `|ω|_BL ~ 375 /s`，与脱涡区 p99 同数量级
+- 若不反归一化，u 与 v 各自被独立缩放，`ω = ∂v/∂x − ∂u/∂y` 的差分会被两个不同尺度的项污染，物理意义丢失，跨 case 阈值不可比
 
-**为什么还不能算最终确认**：上一轮量级数据取自 **t=0 未发展流**，尚未看到涡街已发展时（`--timestep 300`）的 ω 量级与空间结构是否仍然合理、是否真能区分活跃/平静区。**请你跑完 §六 步骤 3（带 `--timestep`）后再回填最终结论。** 在那之前 U4 不算闭环。
+**D1 暂定结论（倾向，未最终确认）**：**训练期传 `vel_mean/vel_std` 反归一化**（来源 `node_stats.json`，M4 实施）。理由：D2 倾向绝对阈值，前提是物理量纲一致、跨 case 可比 → 需反归一化。
+**为什么还不能算闭环**：以上是「可视化用物理速度」的量级；**训练时归一化空间下的实际表现还没在 M4 真实数据管线里验证过**。**M4 接训练数据前再最终拍板**。
+
+### 5.2 S 的设计修正：已弃用 KH 剪切 `∂u/∂y−∂v/∂x`，改用应变率幅值
+
+设计稿原文把 KH 剪切定义为 `S = ∂u/∂y − ∂v/∂x`，但它**恒等于 −ω**（`omega = ∂v/∂x − ∂u/∂y`），Router 取绝对值后与涡量完全冗余，4 判据退化为 3 维独立信息。
+
+**已采取的处置（代码已改，待重跑测试确认）**：把 S 改为**应变率幅值** `S = √(2·S_ij·S_ij)`（速度梯度对称部分），与 ω（反对称部分）严格独立、恒 ≥ 0。
+- `physics_ops.py:183` 已是新公式；日志 `S min=0.169≥0` 证明运行的就是新 S（旧 S 会有大负值）。
+- 单测期望已改（shear S=1、rotation S=0），但**新版 pytest 尚未实跑确认**。
+- 旧文档里「S 与 ω 完全镜像 / S≡−ω」的判读**已作废**（那是改之前的现象）。
+
+> 因此 M3 Router 现在可把 ω 与 S 当作两个独立物理特征，无需再担心冗余。
 
 ---
 
-## 六、运行步骤（每步：做什么 → 得到什么 → 为什么）
+## 六、运行步骤与实测结果（每步：做什么 → 得到什么 → 为什么）
 
-> 前提：M1 的环境与数据集已就绪（见 M1 文档）。M2 唯一可能新增的依赖是 `pytest`（没有就 `pip install pytest`，或用纯 Python 跑法）。
-
-### 步骤 0 — 同步 M2 改动的文件（你在 `C:\GitHub`，我改在另一路径）
-
-- **做什么**：确认下列 5 个文件是 M2 最新版（新建的存在、修改的已更新）：
-
-  | 文件 | 操作 |
-  | --- | --- |
-  | `amr_m4gn/physics_ops.py` | 新增 |
-  | `amr_m4gn/__init__.py` | 修改（加 `from .physics_ops import ...`）|
-  | `amr_m4gn/modal_decomp.py` | 修改（L、M 转 float64）|
-  | `visualize_partition.py` | 修改（`--plot_physics`、`--timestep`、配色 API、终端日志保存 `--log_file`/`--no_log`）|
-  | `tests/test_physics_ops.py` | 新增（注意 S 测试本轮改过）|
-
-- **得到什么**：5 个文件齐全且为最新。
-- **为什么**：上次 `cannot import name compute_ns_quantities` 就是 `__init__.py` 没同步导致的。**先核对再跑，避免重复踩这个坑。**
+> 前提：M1 的环境与数据集已就绪（见 M1 文档）。M2 唯一可能新增的依赖是 `pytest`。
 
 ### 步骤 1 — 包导入自检
 
-- **做什么**：
-  ```bash
-  cd <你的仓库>\examples\cfd\vortex_shedding_mgn
-  python -c "from amr_m4gn import compute_ns_quantities, lstsq_gradient, virtual_step; print('physics_ops OK')"
-  ```
-- **得到什么**：打印 `physics_ops OK`。
-- **为什么**：先确认新模块能被包正确导出、没有 import 链错误。**若报 `cannot import name ... from 'amr_m4gn'`**：说明你的 `amr_m4gn/__init__.py` 没更新（缺 `from .physics_ops import ...`），补上即可——这是文件没同步导致，不是代码错。
+```bash
+cd E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn
+python -c "from amr_m4gn import compute_ns_quantities, lstsq_gradient, virtual_step; print('physics_ops OK')"
+```
+
+期望：`physics_ops OK`。**为什么**：先排掉 import 链错误（上次 `__init__.py` 没同步就报过 import 错）。
 
 ### 步骤 2 — 跑单元测试（不依赖数据集，先跑这个）
 
-- **做什么**：
-  ```bash
-  pytest tests/test_physics_ops.py -v
-  # 没装 pytest 时等价跑法：
-  python tests/test_physics_ops.py
-  ```
-- **得到什么**：8 个测试全部 `PASS`（pytest 显示 `8 passed`）。
-- **为什么**：物理量算子的正确性**不需要真实数据**，先用解析场（已知答案的 shear/rotation/uniform 流）确认梯度、涡量、应变、动量、反归一化、虚拟步全对。先测算子、再上真实网格看图，出问题能立刻分清是「算子错」还是「数据/可视化错」。
+```bash
+pytest tests/test_physics_ops.py -v
+```
 
-### 步骤 3 — 在真实 case 上出物理量图（**务必带 `--timestep`**）
+**为什么先跑这个**：解析场上验证算子正确性，先排掉「算子错」与「数据/可视化错」的耦合。**注意：本轮改了 S 公式与 2 个测试，须重跑确认（你之前的 8 passed 是改之前的版本）。**
 
-- **做什么**：
-  ```bash
-  # t=0 是未发展的初始流，看不到涡街；用后期帧看 Karman 脱涡：
-  python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --case_idx 0 --timestep 300 --plot_physics
-  ```
-- **得到什么**：
-  - 在 `partition_vis/case0/` 子目录下产出 `01`~`06` 图 + **`07_physics_fields.png`**（2×2：G/ω/M/S）；
-  - 终端 `[1/6]` 行显示 `(timestep 300)`，并打印 4 个量的 `min/max/|·|p99`；
-  - **新增**：终端全部输出自动存到 `partition_vis/case0/run_log_case0_t300.txt`（脚本第一行会打印该日志路径）。**你在另一台机器跑完后，把这个 txt 发我即可，不用复制粘贴终端。**
-  - ARPACK / get_cmap 告警预期已消失（M2 已实现修复，**以这次重跑的终端/日志为准**）。
-- **为什么**：上次用默认 t=0 看不到尾迹（验收点 B/C/D 看似不过）——根因是初始流未发展，不是算子错。带 `--timestep 300` 后涡街已发展，ω 子图应出现圆柱后方红蓝相间的脱涡。
+### 步骤 3 — 在真实 case 上出物理量图（4 case 对照）
 
-> **关于输出目录与日志**：每个 `--case_idx` 的产物存到独立子目录 `<output_dir>/case<idx>/`，不同 case 不互相覆盖。日志默认开启、文件名再按 `timestep` 区分；可用 `--log_file <路径>` 自定义，或 `--no_log` 关闭。
+```bash
+python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --case_idx 0  --timestep 300 --plot_physics
+python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --case_idx 1  --timestep 300 --plot_physics
+python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --case_idx 50 --timestep 300 --plot_physics
+python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --case_idx 99 --timestep 300 --plot_physics
+```
 
-### 步骤 4 — 多看几个 case / 多个时间步（可选但建议）
+**实测物理量量级（t=300，物理速度，新 S=应变率幅值）—— 真实运行结果，取自各 `caseN/run_log_caseN_t300.txt`**：
 
-- **做什么**：换 `--case_idx 1/50/99`、或同一 case 换 `--timestep 100/200/300` 各跑一次。
-- **得到什么**：`partition_vis/case1/`、`case50/`、`case99/` 等各自独立的图与日志（不同 case 不覆盖；同 case 不同 timestep 的图会覆盖，但日志按 timestep 分文件保留）。
-- **为什么**：确认物理量量级跨 case 稳定（呼应 D2 的「绝对阈值」前提）；若某 case 量级差一个数量级，说明阈值不能用全局绝对值，要回到 Top-r 分位方案。
+| case | Nodes | λ₁ | λ₆ | G p99 | \|ω\| p99 | M p99 | S p99 | S min |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 1923 | −3.85e−6 | 61.04 | 184.5 | **188.1** | 2.24e−3 | 176.6 | 0.169 |
+| 1 | 1757 | −6.07e−6 | 60.69 | 127.7 | **133.1** | 1.46e−3 | 120.1 | 0.450 |
+| 50 | 1912 | +1.77e−5 | 60.15 | 195.3 | **208.3** | 2.12e−3 | 185.7 | 0.485 |
+| 99 | 1976 | +3.30e−5 | 60.88 | 63.2 | **68.5** | 8.42e−4 | 56.9 | 0.043 |
+
+**关键观察（均为真实运行数据）**：
+1. **S min 始终 > 0（0.04–0.49），且 S p99 ≠ |ω| p99**（如 case0：S=176.6 vs |ω|=188.1）→ **新 S=应变率幅值已在真实数据生效，与涡量独立**（旧 S=−ω 会有大负值且 |S|=|ω|，现已不是）。
+2. **λ₁ ≈ 0（±1e-5），干净**：比 M1/早期跑出的 λ₁≈±0.05~0.24 干净得多 → `modal_decomp` 的 float64 修复看来已生效（λ₁ 是 Neumann Laplacian 的常数模态，理论应为 0）。**注意**：ARPACK/get_cmap 告警走 stderr 不进日志，是否完全消失仍需看终端。
+3. **G ≈ |ω| 在量级上**：`G` 主要被边界层/剪切层 `∂u/∂y` 主导，与 |ω| 同数量级合理。
+4. **跨 case 量级浮动约 3×**（|ω|p99 68–208）：case 间来流速度有差异（case99 偏低）；**未跨数量级**，绝对阈值（D2）暂定成立，但 M3 阈值需按训练集 `|ω|p99` 统计量定，不能拍脑袋。
+
+### 步骤 4 — 看图（t=300，发展态，已有 Kármán 涡街）
+
+`partition_vis/case0/07_physics_fields.png`（case 0，t=300，真实运行）：
+
+![M2 物理量场图 case0 t300](examples/cfd/vortex_shedding_mgn/partition_vis/case0/07_physics_fields.png)
+
+**子图逐一判读（基于你跑出的 t=300 真实图）**：
+
+| 子图 | 实测形态（t=300） | 物理判断 |
+| --- | --- | --- |
+| **G** (左上 viridis) | 圆柱表面一圈最亮，圆柱后方拖出一条/两条剪切层亮带延伸到 x≈0.9，来流暗 | ✅ 边界层 + 尾迹剪切层梯度被正确捕捉 |
+| **ω** (右上 RdBu_r) | 圆柱上下表面红/蓝偶极，尾迹中红蓝交替斑块向下游延伸（Kármán 涡街），来流≈白 | ✅ 脱涡序列清晰、符号正确，正是 M3 要区分的活跃区 |
+| **M** (左下 viridis) | 来流入口亮、通道内斑驳、圆柱处=0 | ✅ `M=ρ\|U\|·area`，形态合理；斑驳是 Voronoi area 离散噪声，不影响段聚合 |
+| **S** (右下) | ⚠️ **当前图标题仍是「KH shear du/dy−dv/dx」+ 发散色标** | **数值已是新 S（日志 `S min=0.169≥0`、`S p99=176.6`），但这张图是在我修绘图 spec 之前跑的，标题/色标画错。需同步代码后重跑，才能得到标题「Strain-rate …」+ viridis 的正确 S 图。** |
+
+**结论**：t=300 下 G/ω/M 三个子图形态都对，尾迹涡街可见，物理上能区分活跃区（尾迹/壁面）与平静区（来流）；唯一遗留是 **S 子图的标签/配色**需重跑刷新（数值本身已正确）。
+
+### 步骤 5 — 多 case 量级对比（D1/D2 联合复核）
+
+见步骤 3 的表。**结论**：跨 case 同数量级 → D1（反归一化）+ D2（绝对阈值）方案自洽。
 
 ---
 
 ## 七、验收清单（M2 退出标准）
 
-| 验收点 | 看哪里 | 合格判据 | 为什么 |
+| 验收点 | 看哪里 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| **A. 单测** | `pytest` 输出 | 8/8 PASS（**本轮改了 S，须重跑**）| 算子在解析场上正确 |
-| **B. 涡量结构** | `07` 的 ω 子图（**须 `--timestep 300`**）| 圆柱后方涡街清晰、上下两侧异号（红蓝相间）、来流区≈0 | ω 能区分活跃/平静（M3 核心输入）|
-| **C. 梯度 G** | `07` 的 G 子图 | 壁面/圆柱表面、剪切层处高，来流低 | G 捕捉边界层与间断 |
-| **D. 应变 S** | `07` 的 S 子图 | 尾迹剪切层/涡街两侧显著、纯旋转涡核处相对低 | S 捕捉剪切/拉伸，且**与 ω 不同**（独立判据）|
-| **E. 量级合理（D1）** | 终端 `omega |·|p99` | 物理速度下量级合理、跨 case 同量级（t=0 已实测，发展态待确认）| 用于最终拍板 D1 |
-| **F. 无残留告警** | 终端 | 不再出现 ARPACK / get_cmap 告警 | 确认 M2 的告警修复真的生效（你尚未重跑过）|
+| **A. 单测** | `pytest` 输出 | 8/8 PASS | ⏳ **须重跑**：你那次 8/8 是**改 S 公式之前**的版本；本轮改了 S 与 2 个测试（rotation S=0、shear S=1），新版未实跑确认 |
+| **B. 尾迹 ω** | `07` 的 ω 子图 | t=300 圆柱后方红蓝交替脱涡（Kármán 涡街）| ✅ 真实 t=300 图已见脱涡（case0；4 case 量级 \|ω\|p99=68–208）|
+| **C. 边界层/尾迹 G** | `07` 的 G 子图 | 壁面/圆柱表面 + 尾迹剪切层亮，来流暗 | ✅ 真实 t=300 图符合 |
+| **D. 量级合理（D1）** | 终端 \|ω\|p99 | 物理速度下量级合理、跨 case 同量级 | ✅ 真实 t=300 四 case：68.5 / 133 / 188 / 208，同数量级 |
+| **E. M 形态** | `07` 的 M 子图 | 来流/出流亮、圆柱 0、不爆炸 | ✅ 真实图符合 |
+| **F. 跨 case 一致** | 多 case 量级 | 量级浮动 <10× | ✅ 浮动约 3× |
+| **G. 不破坏 M1** | 仍产出 `01`~`06` + cache（`caseN/` 子目录）| 原 6 图照常 | ✅ 4 case 子目录齐全 |
+| **H. S 子图标签正确** | `07` 的 S 子图 | 标题「Strain-rate …」+ viridis | ⏳ **当前图仍是旧标签（运行早于绘图修复）；数值已是新 S（`S min=0.169≥0`），须重跑刷新标签** |
+| **I. 无残留告警** | 终端（告警走 stderr，不进日志 txt）| 无 ARPACK / get_cmap 告警 | ⏳ λ₁≈0 暗示 dtype 修复生效，但须看重跑终端确认告警真消失 |
+| **I. 无残留告警** | 终端（注意告警走 stderr，不进日志 txt）| 无 ARPACK / get_cmap 告警 | ⏳ 须看重跑时的终端确认（日志只抓 stdout）|
 
-> **重要**：B/C/D 必须用 **`--timestep 300`**（或其它涡街已发展的帧）评估。默认 t=0 是未发展初始流，看不到尾迹，**不代表算子错**。
-
-**M2 通过标准（待你实跑达成）**：A~F 全部满足 + D1 在发展态下确认 → 才能关闭 M2、进入 M3。**目前代码均为「已实现、未经你实跑测试」状态。**
+**M2 通过标准（尚未达成）**：A~I 全部满足 + D1 在发展态确认 → 才能关闭 M2。**当前 A/H/I 仍是「待重跑确认」，故 M2 暂不能判定完成。** 见文末「能否判定完成」结论。
 
 ---
 
@@ -192,23 +204,47 @@ M2 目标（Design Doc §八 M2）：**算对 4 个物理判据，能区分活�
 
 | Design Doc | M2 落地 |
 | --- | --- |
-| §4.6 N-S 物理量算子（含 S 改用应变率幅值的修正说明）| `physics_ops.py`（已实现，未测试通过）|
-| §7.4.2 physics_ops 规格 + 单元测试 | `physics_ops.py` + `tests/test_physics_ops.py`（待重跑）|
-| §八 M2（四标量场可视化、解析场单测 <5%）| `--plot_physics` + 测试 |
-| 决策门 D1 / 不确定点 U4 | §五（暂定反归一化，未最终确认）|
+| §4.6 N-S 物理量算子 | `physics_ops.py` |
+| §7.4.2 physics_ops 规格 + 单元测试 | `physics_ops.py` + `tests/test_physics_ops.py` |
+| §八 M2（四标量场可视化、解析场单测 <5%）| `--plot_physics` + `--timestep` + 测试 |
+| 决策门 D1 / 不确定点 U4 | §5.1 暂定（训练期反归一化，未最终确认）|
+| S 的设计修正（弃 KH 剪切→应变率幅值）| §5.2（代码已改，pytest 待重跑确认）|
 
 **M2 未覆盖（属后续）**：
-- 虚拟步在可视化里未启用（无 t−1 历史；M3/M5 rollout 时接入）。`virtual_step` 函数已写好，但未在真实流程中跑过。
+- 虚拟步在可视化里未启用（无 t−1 历史；M3/M5 rollout 时接入）。`virtual_step` 函数已写好，但其单测尚待随本轮重跑确认。
 - 物理量 → 段聚合 → 保留/折回决策 = **M3 的 AMR Router**。
 
 ---
 
-## 九、M3 注意事项（下一步，待 M2 实跑通过后再开始）
+## 九、M3 注意事项（下一步必读）
 
 1. **新建 `amr_m4gn/amr_router.py` + `amr_m4gn/pe.py`**（Design Doc §7.4.1/§7.4.3）。
-2. **D2 暂定用绝对阈值**（M1 实测 4 case 坐标全等）；**D1 暂定阈值作用在反归一化后的物理量上**（均待 M2 发展态确认）。
-3. **复用 M2 的 `compute_ns_quantities`**：M3 在 L1（256 段）上对每段做 `max|ω|`、`max(G)`、`max(S)`、`max(M)` 聚合，再按各自阈值判活跃。注意 ω 取 `max|·|`（有正负），G/M/S 恒 ≥ 0 直接 `max`。
-4. **盯住 M1 的「流向带状」隐患**（Progress_M1 §7.3.1.1）：M3 出 token 分布统计（决策门 D3）时，重点看尾迹段是否「一段跨高涡量+平静区」；若浪费明显，调 num_modes/K/τ。
-5. **M2 已实现 M1 两个告警的修复，但需你重跑确认生效**（ARPACK dtype + matplotlib colormap）。
+2. **第一件事：`--timestep 300` 跑一次 case 0**，截 `07_physics_fields.png` 的 ω 子图，确认 Kármán 涡街可见（验收点 H）。**这一步同时是决策门 D3 的输入**（看「活跃区占比」决定 K0/K1 阈值）。
+3. **S 已改为应变率幅值（§5.2，代码已生效）**：M3 Router 可把 ω 与 S 当两个独立物理特征。无需再像旧版那样把 S 当 sanity check。注意先重跑 pytest 确认新 S 测试通过。
+4. **复用 M2 的 `compute_ns_quantities`**：M3 在 L1（256 段）上对每段做 `max|ω|` 等聚合，再按阈值判活跃。**训练期记得传 `vel_mean/vel_std`**。
+5. **M1 决策门 D2 暂定**：用绝对阈值（M1 实测 4 case 坐标全等）。**M3 D3 待定**：阈值具体数值（看 §六 表，建议初值 `|ω|_thresh = 50` /s，约 BL p99 的 1/7，让脱涡区落在活跃侧、来流落在平静侧）。
+6. **盯住 M1 的「流向带状」隐患**（Progress_M1 §7.3.1.1）：M3 出 token 分布统计（D3）时，重点看尾迹段是否「一段跨高涡量+平静区」；若浪费明显，调 num_modes/K/τ。
+7. **遗留项状态**：
+   - M1 的 ARPACK dtype 告警 / matplotlib `get_cmap` 弃用告警：M2 已实现修复，**但需你重跑确认告警真的消失**（告警走 stderr，不进日志 txt）。
+   - M2 的 `02_velocity.png` 标题硬编码 `(timestep 0)` → 待改成 `(timestep {t})`。
+   - 多 case 输出已改为 `caseN/` 子目录，不再互相覆盖（M2 已实现）。
 
 **M3 退出标准**（Design Doc §八 M3）：四例路由单测全过（全平静→T=64；全活跃→T=256；半场→中间值；阈值可复现）；可视化中尾迹保细、来流被合并；产出 T 分布统计（喂 D3）。
+
+---
+
+## 十、M2 能否判定完成？（当前结论：否）
+
+**已用真实运行确认的**（你实跑的 4 case × t=300 数据/图）：
+- 物理形态：G 图显示边界层+尾迹剪切层、ω 图显示圆柱后红蓝交替脱涡（Kármán 涡街）、M 图形态合理；
+- 量级合理：`|ω|p99 = 68.5 / 133 / 188 / 208`（4 case），同数量级，与 BL 涡量估计同阶；
+- **新 S 已生效**：`S min` 全 > 0（0.04–0.49）、`S p99 ≠ |ω|p99` → 应变率幅值已在真实数据上独立于涡量；
+- **λ₁ ≈ 0（±1e-5）干净**：暗示 `modal_decomp` 的 float64 修复已生效；
+- 按 `case_idx` 分文件夹 + 终端日志落盘均生效（4 个 case 子目录齐全）。
+
+**尚未确认、阻塞 M2 关闭的**：
+1. **更新版 pytest 未重跑**：本轮改了 S 公式与 2 个测试期望（rotation S=0、shear S=1）。你之前的「8 passed」是改之前的版本，对新测试无效。可视化只验证了「形态/量级合理」，没验证解析场上的**精确值**（pytest 才验这个）。
+2. **标签正确的 S 图未重跑**：当前 `07` 图的 S 子图标题/色标是旧的（运行早于绘图修复）；数值已正确，只是标签错，重跑即刷新。
+3. **告警是否完全消失未确认**：ARPACK/get_cmap 走 stderr，不进日志（λ₁ 干净是间接证据，但不等于确认）。
+
+**结论**：M2 的**算子实现 + 可视化 + 物理形态/量级**已被 4 个 case 的真实 t=300 运行强力支持，方向明确正确；但 **pytest（解析场精确值）未用新版重跑**、**S 子图标签未刷新**、**告警未在终端确认**这三项还没闭环，因此**暂不判定 M2 完成**。补这两步即可关闭：① `pytest tests/test_physics_ops.py -v`（确认新 S 测试全过）；② 同步绘图修复后 `--timestep 300 --plot_physics` 重跑一次（看正确标签的 S 图 + 终端无告警）。

@@ -254,10 +254,10 @@ def plot_physics_fields(pos, cells, quantities, save_path):
     triang = tri.Triangulation(pos[:, 0], pos[:, 1], cells)
 
     specs = [
-        ("G",     "Velocity-gradient |grad U|",       "viridis", False),
-        ("omega", "Vorticity  dv/dx - du/dy",         "RdBu_r",  True),
-        ("M",     "Momentum  rho |U| area",           "viridis", False),
-        ("S",     "KH shear  du/dy - dv/dx",          "RdBu_r",  True),
+        ("G",     "Velocity-gradient |grad U|",          "viridis", False),
+        ("omega", "Vorticity  dv/dx - du/dy",            "RdBu_r",  True),
+        ("M",     "Momentum  rho |U| area",              "viridis", False),
+        ("S",     "Strain-rate  sqrt(2 S_ij S_ij)",      "viridis", False),
     ]
     fig, axes = plt.subplots(2, 2, figsize=(18, 8))
     for ax, (key, title, cmap, diverging) in zip(axes.flat, specs):
