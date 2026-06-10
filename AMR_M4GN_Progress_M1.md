@@ -238,6 +238,41 @@ Level 0: 64 segments / Level 1: 256 segments       ← 验收点 E
 
 **M1 通过标准**：A~F 全部合格 → M1 关闭，进入 M2。
 
+### 7.3.1 实测结果（2026-06-10，4 个 case）
+
+跑完 `test` 划分 `case_idx ∈ {0, 1, 50, 99}`，肉眼+数值核验全过：
+
+| case | Nodes | Cells | type=0/4/5/6 | pos x-range | pos y-range | λ₁ | λ₆ | L0 段 (min/max/mean/std) | L1 段 (min/max/mean/std) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | 1923 | 3612 | 1689/17/17/200 | [0, 1.6] | [0, 0.41] | -0.0501 | 61.05 | 16/50/30.0/9.3 | 4/13/7.5/2.4 |
+| 1 | 1757 | 3276 | 1519/17/17/204 | [0, 1.6] | [0, 0.41] |  0.0173 | 60.68 | — | — |
+| 50 | 1912 | 3590 | 1678/17/17/200 | [0, 1.6] | [0, 0.41] | -0.0352 | 60.15 | — | — |
+| 99 | 1976 | 3718 | 1742/17/17/200 | [0, 1.6] | [0, 0.41] |  0.0321 | 60.81 | — | — |
+
+**结论**：
+- **A. node type 一致**：4 case 全是 `{0,4,5,6}`，inflow/outflow 恒为 17，type=6 在 200~204（圆柱大小/位置略变）。修正 #1（`obstacle_type_id=6`）确认正确。
+- **B. pos 范围 4 case 全等** `x∈[0, 1.6], y∈[0, 0.41]` → **决策门 D2 闭环：AMR 阈值用「绝对值」**，不需 Top-r 分位（M3 阈值实现可直接读 `pos` 比较）。
+- **C. 特征值一致性高**：λ₁≈0（数值噪声 ±0.05，Neumann 常数模），λ₂∈[3.60, 3.83]、λ₆∈[60.15, 61.05]，跨 case 谱稳定 → 模态特征 `f_md` 跨 case 可比。
+- **D. f_obs 物理正确**：通道中线 ≈ 通道半高（0.205），圆柱位置中线变暗（验收点 D 通过，见 case 0 `04_obstacle_dist.png`）。
+- **E. 分区合格**：L0 段大小比 50/16≈3.1×、L1 段大小比 13/4≈3.25×，未极端悬殊；mean=N/K 命中理论值；颜色 x 向自然渐变、连通无飞地。
+
+**M1 验收**：✅ 关闭。
+
+### 7.3.1.1 ⚠️ 关注项（非阻塞，留待 M3/D3 复核）— 分区呈「流向带状」
+
+观察 `05_partition_L0.png` / `06_partition_L1.png`：分区颜色沿 x 方向 red→…→black 平滑渐变，本质是**沿流向（x）的竖条带**，竖直（y）方向细分很弱。原因：域为长通道（1.6×0.41，~4:1），低阶 Laplacian 模（Mode2-4）天然是流向驻波，主导了 SLIC 的 `f_md`；圆柱/尾迹结构要到 Mode5-6 才出现，权重低。
+
+- **为什么 M1 仍可关闭**：分区只提供「候选段」，真正决定 token 粗细的是 **M3 的 AMR Router 用运行时物理量（涡量 ω 等）**判活跃，与分区是否带状无关。圆柱区已被 f_obs 单独隔出（灰色段），满足连通/均衡。
+- **潜在风险（M3/D3 须验证）**：若尾迹某个 L1 段同时跨「高涡量中线」与「平静外区」，按「段内 max|ω|」会把整段保细 → 浪费。即**尾迹段的几何隔离度可能不足**。
+- **可调杠杆（M3 若 D3 显示 token 浪费再用，勿提前改）**：① 增 `num_modes`（捕捉更多圆柱/尾迹结构）；② 增大 K0/K1；③ 提高 SLIC `τ`（更紧凑、更各向同性的段）；④ 给 f_obs 更高权重。
+
+### 7.3.2 已知非阻塞告警
+
+| 告警 | 触发位置 | 影响 | 处理 |
+| --- | --- | --- | --- |
+| `M does not have the same type precision as A` (ARPACK) | `modal_decomp.py:285/291` | 无功能影响，仅收敛性提示 | 想消除：在 `eigsh` 调用前 `M = M.astype(A.dtype)`（M2 顺手修）|
+| `cm.get_cmap deprecated` (matplotlib 3.7+) | `visualize_partition.py:225` | 出图正常 | 想消除：换 `matplotlib.colormaps.get_cmap('tab20', K)` |
+
 ### 7.4 常见问题
 
 - `ModuleNotFoundError: tfrecord` → `pip install tfrecord`。
@@ -258,7 +293,7 @@ Level 0: 64 segments / Level 1: 256 segments       ← 验收点 E
 | 门 | 在哪 | 等什么数据 | 决定什么 |
 | --- | --- | --- | --- |
 | D1 (U4) | M2 | 对比「反归一化 vs 归一化空间」算的涡量图 | physics_ops 是否反归一化速度（影响物理可解释性）|
-| D2 (U1) | M1/M2 | §7.2 打印的 pos 范围 | AMR 阈值用绝对值还是 Top-r |
+| D2 (U1) | M1/M2 | §7.2 打印的 pos 范围 | AMR 阈值用绝对值还是 Top-r |✅ **已闭环 (2026-06-10)**：4 case (0/1/50/99) pos 全等 `x∈[0,1.6], y∈[0,0.41]` → **用绝对值阈值**
 | D3 | M3 | T（token 数）分布统计 | 最终 K0/K1 与阈值区间 |
 | D4 (U2) | M4 | micro_gnn 单测 | MeshGraphNet 旁路 decoder 用路径 (a) 还是 (b) |
 | D6 (U5) | M5 | 关 AMR 期 loss 曲线 | AMR warm-up 时长 |
@@ -278,4 +313,25 @@ Level 0: 64 segments / Level 1: 256 segments       ← 验收点 E
 
 ### 8.5 下一步（M2）速览
 
-新建 `amr_m4gn/physics_ops.py`（G/ω/M/S + 1-ring 最小二乘 + 虚拟步），扩展 `visualize_partition.py` 出四标量场图。退出标准：解析场单测误差 <5%，可视化中尾迹 ω 显著高于来流。**别忘了先过决策门 D1/D2。**
+新建 `amr_m4gn/physics_ops.py`（G/ω/M/S + 1-ring 最小二乘 + 虚拟步），扩展 `visualize_partition.py` 出四标量场图。退出标准：解析场单测误差 <5%，可视化中尾迹 ω 显著高于来流。**D2 已闭环（绝对阈值），M2 期间需过决策门 D1（涡量反归一化与否）。**
+
+### 8.6 M2 待办清单（具体到文件/函数）
+
+按 Design Doc §7.4.2 / §4.4，M2 一上来要做的事：
+
+1. **新建 `amr_m4gn/physics_ops.py`**：
+   - `compute_gradient(u, v, pos, edge_index) -> (∂u/∂x, ∂u/∂y, ∂v/∂x, ∂v/∂y)`：1-ring 加权最小二乘
+   - `compute_vorticity(grad_u, grad_v) -> ω = ∂v/∂x - ∂u/∂y`
+   - `compute_kh_shear(grad_u, grad_v) -> S = ∂u/∂y - ∂v/∂x`（Kelvin-Helmholtz 剪切，**对齐 Design Doc §4.6 / AMR-Transformer Eq.5**；注意不是应变率幅值 √(2 S_ij S_ij)）
+   - `compute_velocity_gradient_mag(grad_u, grad_v) -> G = √(‖∇u‖²+‖∇v‖²)`（速度梯度，§4.6 第一判据）
+   - `compute_momentum_indicator(u, v, area) -> M = ρ·|U|·area`（Design Doc §4.6）
+   - `virtual_step(u_t, u_prev) -> u_{t+1}^* = u_t + (u_t − u_prev)`（前向欧拉，用于 AMR 阈值的预估场）
+2. **扩展 `visualize_partition.py`**：加 `--plot_physics` 开关，多出 4 张图 `07_grad.png` / `08_vorticity.png` / `09_strain.png` / `10_momentum.png`。
+3. **决策门 D1 实测**：在 case 0 上同时算「归一化 u/v」和「反归一化 u/v（用 `node_stats.json`）」的涡量场；对比尾迹 ω 量级是否合物理（典型 Re=100 圆柱尾迹 |ω|~O(10) /s）→ 决定 `physics_ops` 默认是否反归一化。
+4. **单测**：`tests/test_physics_ops.py`：
+   - 解析场 `u=sin(x)cos(y), v=-cos(x)sin(y)` → ω 误差 <5%
+   - 均匀流 `u=const` → ω≈0、S≈0
+   - 全参有梯度（用合成图反传 dummy loss）
+5. **顺手修 M1 告警**（§7.3.2）：ARPACK dtype 一致 + matplotlib colormap API。
+
+**M2 退出标准**：①解析场单测全过 ②case 0 涡量图尾迹结构正确（脱涡可见）③D1 拍板写进 doc。
