@@ -22,6 +22,7 @@ Output:
 import os
 import sys
 import json
+import atexit
 import argparse
 import numpy as np
 import torch
@@ -43,6 +44,27 @@ from amr_m4gn.segmentation import (
     hybrid_segmentation,
 )
 from amr_m4gn.physics_ops import compute_ns_quantities
+
+
+class _Tee:
+    """Duplicate everything written to stdout into a log file as well.
+
+    Lets the user save the full console output to a plain-text file without
+    manual copy-paste (handy when running on a different machine). Each write
+    is flushed immediately so a partial log survives even if the script crashes.
+    """
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 
 def load_single_case(data_dir, split="test", case_idx=0, timestep=0):
@@ -401,11 +423,31 @@ def main():
         help="Also compute & plot the four AMR physical indicators G/omega/M/S "
              "(M2). Uses PHYSICAL velocity from TFRecord (no denormalization)."
     )
+    parser.add_argument(
+        "--log_file", type=str, default=None,
+        help="Path of the plain-text file to also save all console output to. "
+             "Default: <output_dir>/run_log_case<idx>_t<timestep>.txt"
+    )
+    parser.add_argument(
+        "--no_log", action="store_true", default=False,
+        help="Disable saving console output to a text file."
+    )
     args = parser.parse_args()
-    
+
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
+
+    # ---- Tee console output to a plain-text log file (unless disabled) ----
+    if not args.no_log:
+        log_path = args.log_file or os.path.join(
+            args.output_dir,
+            f"run_log_case{args.case_idx}_t{args.timestep}.txt",
+        )
+        _log_handle = open(log_path, "w", encoding="utf-8")
+        atexit.register(lambda: (_log_handle.flush(), _log_handle.close()))
+        sys.stdout = _Tee(sys.__stdout__, _log_handle)
+        print(f"[log] Console output is also saved to: {os.path.abspath(log_path)}")
+
     print("=" * 70)
     print("AMR-M4GN Preprocessing Visualization")
     print("=" * 70)
