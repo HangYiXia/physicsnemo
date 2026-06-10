@@ -13,7 +13,7 @@ AMR-M4GN Preprocessing Visualization
   Saved: ./partition_vis\case0\02_velocity.png
 
 [3/6] Computing Laplacian eigenmodes (m=6)...
-  Eigenvalues: [-3.84805662e-06  3.80943012e+00  1.48260355e+01  3.44431992e+01
+  Eigenvalues: [-3.84826626e-06  3.80943012e+00  1.48260355e+01  3.44431992e+01
   5.53201637e+01  6.10396194e+01]
   Saved: ./partition_vis\case0\03_eigenmodes.png
 
