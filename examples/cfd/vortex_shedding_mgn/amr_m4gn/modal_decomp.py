@@ -230,6 +230,11 @@ def laplacian_eigenmodes(
         L, M = cotangent_laplacian(pos_np, cells_np, num_nodes)
     else:
         L, M = graph_laplacian(edge_index_np, num_nodes)
+
+    # Ensure L and M share the same float dtype, otherwise ARPACK (eigsh) warns
+    # "M does not have the same type precision as A" and convergence may suffer.
+    L = L.astype(np.float64)
+    M = M.astype(np.float64)
     
     # Handle boundary conditions
     if boundary_type == "dirichlet" and node_type is not None:

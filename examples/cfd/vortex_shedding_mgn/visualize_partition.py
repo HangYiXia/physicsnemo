@@ -45,10 +45,15 @@ from amr_m4gn.segmentation import (
 from amr_m4gn.physics_ops import compute_ns_quantities
 
 
-def load_single_case(data_dir, split="test", case_idx=0):
+def load_single_case(data_dir, split="test", case_idx=0, timestep=0):
     """
     Load a single case from the TFRecord dataset.
-    Returns mesh_pos, cells, node_type, edge_index, velocity (first timestep).
+    Returns mesh_pos, cells, node_type, edge_index, velocity (at `timestep`).
+
+    `timestep` selects which frame of the trajectory to read the velocity from.
+    t=0 is the (undeveloped) initial flow with no vortex street; use a later
+    frame (e.g. 300) to see the developed Karman wake. Mesh geometry is static,
+    so pos/cells/node_type are time-independent.
     """
     # Import tfrecord
     try:
@@ -100,7 +105,12 @@ def load_single_case(data_dir, split="test", case_idx=0):
     mesh_pos = data_np["mesh_pos"][0]      # [N, 2]
     cells = data_np["cells"][0]            # [num_cells, 3]
     node_type = data_np["node_type"][0]    # [N, 1]
-    velocity = data_np["velocity"][0]      # [N, 2] (first timestep)
+    traj_len = data_np["velocity"].shape[0]
+    t = int(np.clip(timestep, 0, traj_len - 1))
+    if t != timestep:
+        print(f"  [load] timestep {timestep} out of range [0,{traj_len-1}], "
+              f"clamped to {t}.")
+    velocity = data_np["velocity"][t]      # [N, 2] at timestep t
     
     # Build edge_index from cells
     num_cells = cells.shape[0]
@@ -260,7 +270,9 @@ def plot_partition(pos, cells, assign, level_name, num_segments, save_path,
     
     # Use a colormap with enough distinct colors
     K = int(assign.max()) + 1
-    cmap = cm.get_cmap('tab20', K) if K <= 20 else cm.get_cmap('nipy_spectral', K)
+    # matplotlib >=3.7: cm.get_cmap is deprecated; use colormaps[...].resampled.
+    _name = 'tab20' if K <= 20 else 'nipy_spectral'
+    cmap = matplotlib.colormaps[_name].resampled(K)
     
     tc = ax.tripcolor(triang, assign.astype(float), cmap=cmap,
                       shading='flat', alpha=0.8)
@@ -350,6 +362,12 @@ def main():
         help="Which case to visualize (default: 0)"
     )
     parser.add_argument(
+        "--timestep", type=int, default=0,
+        help="Trajectory frame for the velocity field (default: 0 = initial, "
+             "undeveloped flow). Use a later frame (e.g. 300) to see the "
+             "developed Karman vortex street in the physics fields."
+    )
+    parser.add_argument(
         "--num_modes", type=int, default=6,
         help="Number of Laplacian eigenmodes (default: 6)"
     )
@@ -393,8 +411,9 @@ def main():
     print("=" * 70)
     
     # ---- Load data ----
-    print(f"\n[1/6] Loading case {args.case_idx} from {args.data_dir} ({args.split})...")
-    data = load_single_case(args.data_dir, args.split, args.case_idx)
+    print(f"\n[1/6] Loading case {args.case_idx} (timestep {args.timestep}) "
+          f"from {args.data_dir} ({args.split})...")
+    data = load_single_case(args.data_dir, args.split, args.case_idx, args.timestep)
     
     pos = data["mesh_pos"]
     cells = data["cells"]

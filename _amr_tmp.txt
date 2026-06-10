@@ -1,0 +1,1281 @@
+AMR-Transformer: Enabling Efficient Long-range Interaction for Complex
+Neural Fluid Simulation
+Zeyi Xu2*
+Jinfan Liu1*
+Kuangxu Chen3
+Ye Chen1
+Zhangli Hu1
+Bingbing Ni1†
+1Shanghai Jiao Tong University
+2Shanghai University
+3Shenzhen Technology University
+xzyblxa@shu.edu.cn
+{ljf 2024, nibingbing}@sjtu.edu.cn
+https://github.com/JfanLiu/AMR Transformer
+Figure 1.
+AMR tokenizer results in high-resolution simulation. Visualization of the AMR tokenizer applied to 1024 × 1024 shock
+wave and explosion simulations. The AMR tokenizer captures fine-scale structures while reducing token count. Right panels compare the
+regular 512 × 512 grid with the AMR partitioning, each right panel displays the total cell count and partitioning scheme (bottom-right),
+along with the mean squared error (MSE) relative to the 1024 × 1024 ground truth (top-left).
+Abstract
+Accurately and efficiently simulating complex fluid dynam-
+ics is a challenging task that has traditionally relied on
+computationally intensive methods. Neural network-based
+approaches, such as convolutional and graph neural net-
+works, have partially alleviated this burden by enabling
+efficient local feature extraction. However, they struggle
+to capture long-range dependencies due to limited recep-
+tive fields, and Transformer-based models, while providing
+*Co-first authors.
+†Corresponding author.
+global context, incur prohibitive computational costs. To
+tackle these challenges, we propose AMR-Transformer, an
+efficient and accurate neural CFD-solving pipeline that in-
+tegrates a novel adaptive mesh refinement scheme with a
+Navier-Stokes constraint-aware fast pruning module. This
+design encourages long-range interactions between simula-
+tion cells and facilitates the modeling of global fluid wave
+patterns, such as turbulence and shockwaves. Experiments
+show that our approach achieves significant gains in effi-
+ciency while preserving critical details, making it suitable
+for high-resolution physical simulations with long-range
+dependencies. On CFDBench, PDEBench and a new shock-
+arXiv:2503.10257v1  [cs.LG]  13 Mar 2025
+
+wave dataset, our pipeline demonstrates up to an order-of-
+magnitude improvement in accuracy over baseline models.
+Additionally, compared to ViT, our approach achieves a re-
+duction in FLOPs of up to 60 times.
+1. Introduction
+The use of artificial intelligence methods for solving par-
+tial differential equations (PDEs) has become increasingly
+prevalent in computational fluid dynamics (CFD), a field
+with critical applications in science and engineering, in-
+cluding turbulence modeling, airfoil design, and microme-
+chanics. Traditional CFD simulations are computationally
+intensive, particularly when modeling complex fluid behav-
+iors like turbulence and vortex dynamics. Deep learning
+methods provide faster, data-driven approximations of these
+complex physical processes.
+To model local interaction relationships, pioneer meth-
+ods typically utilize computational schemes like convolu-
+tional neural networks (CNNs) [16] and graph neural net-
+works (GNNs) [22, 37] . These methods can be combined
+with techniques like Level of Detail (LOD) [5] or multi-
+scale frameworks [25] to expand the receptive field. They
+have been successfully applied to simulate fluid dynamics
+phenomena governed by Navier-Stokes equations, such as
+cylinder flow and airfoil dynamics [18]. In contrast, implicit
+neural representations (INRs) [19, 23] focus on learning di-
+rect mappings from input to output, bypassing the explicit
+modeling of any interactions. These approaches are primar-
+ily suitable for single-instance solutions under specific con-
+ditions and exhibit limited generalization across different
+physical instances.
+In scenarios that require modeling long-range dependen-
+cies, such as high-precision shockwave simulations, tradi-
+tional local operations may face challenges in capturing the
+inherent global dependencies. While CNNs, especially ar-
+chitectures like UNets, are capable of global communica-
+tion through hierarchical structures (such as skip connec-
+tions), they still rely on a fixed receptive field that can limit
+their ability to model extremely large-scale global inter-
+actions.
+On the other hand, Transformers, through self-
+attention mechanisms, can directly model global interac-
+tions across the entire computational domain, without the
+limitations of a fixed receptive field. However, for an input
+sequence or grid of size N, self-attention has a computa-
+tional complexity of O(N 2). High-precision fluid dynam-
+ics simulations, for instance, can involve millions or even
+billions of grid points per time step, leading to unafford-
+able computational costs and memory requirements for self-
+attention mechanisms.
+Furthermore, in physical simulations, different regions
+contribute varying levels of information and have different
+impacts on the overall dynamics. Some areas require high-
+resolution local modeling to capture complex phenomena
+accurately, while others do not need the same level of detail.
+Treating all regions equally is inefficient and can lead to
+significant redundancy, especially in simulations with het-
+erogeneous complexities. While patch-based methods like
+Vision Transformer (ViT) [6] attempt to address computa-
+tional costs by dividing the input into patches, ViT treats all
+patches indiscriminately, lacking tailored adjustments for
+regions of interest. This limitation restricts the ability to
+capture critical details in complex physical simulations.
+Given these limitations, there is a clear need for a method
+that efficiently models global interactions without in-
+curring excessive computational costs. To address this,
+we propose the AMR-Transformer pipeline, which com-
+bines Adaptive Mesh Refinement (AMR) as a tokenizer
+with an Encoder-only Transformer neural solver to model
+long-range dependencies. Our approach employs a hier-
+archical multi-way tree-based AMR structure, merging re-
+dundant information while preserving multi-scale features.
+In addition, a Navier-Stokes constraint-aware fast pruning
+module based on physical properties such as velocity gradi-
+ent, vorticity, momentum, and phenomena like the Kelvin-
+Helmholtz instability, guides adaptive focus on regions with
+complex dynamics. During training, we randomly gener-
+ate hyperparameters for the subdivision criteria, allowing
+for manual adjustment post-training to optimize the balance
+between accuracy and efficiency.
+Extensive experiments are conducted and analyzed on
+the CFDBench [39] and PDEbench [28] benchmarks,
+which include incompressible flow and PDE-based prob-
+lems, to evaluate the framework comprehensively. Addi-
+tionally, we provide a new shockwave dataset with four
+times the resolution of the CFDBench dataset, introduc-
+ing compressible flow scenarios, that feature a more un-
+even distribution of physical information and significantly
+finer-grained details. Experiments show that our pipeline
+achieves state-of-the-art (SOTA) performance in most prob-
+lems, with accuracy improvements of up to an order of
+magnitude compared over previous SOTA. Our tokenizer
+can effectively reduce the number of tokens by a factor of
+2 to 10 across various problems, with negligible loss in
+simulation accuracy. Given the O(N 2) complexity of self-
+attention, the reduced token count translates into a substan-
+tial speedup, approximately quadratic in relation to the to-
+ken reduction.
+2. Related Work
+2.1. AI for CFD
+Recent advancements in artificial intelligence show great
+promise in solving CFD problems, providing faster and
+more efficient alternatives to traditional methods. Physics-
+Informed Neural Networks (PINNs) [23, 24, 38] integrate
+physical constraints directly into the loss function, ensuring
+compliance with governing equations. DeepONet [9, 19,
+35, 36] leverages a fully connected network to learn nonlin-
+
+ear operators, demonstrating strong performance on small
+datasets. The Fourier Neural Operators (FNOs) [16, 29, 32]
+combine convolutional networks with fast Fourier trans-
+forms (FFT) for efficient PDE solving. Graph-based neu-
+ral networks (GNNs) [1, 34], which model simulation do-
+mains as graphs, have led to advancements like the Graph
+Neural Simulator (GNS) [12, 26] and Graph Neural Op-
+erator (GNO) [15, 41]. These methods primarily capture
+local dependencies, which can lead to insufficient accu-
+racy. Transformer-based PDE solvers [8, 10, 11, 17, 33]
+partition simulation domains into token sequences, captur-
+ing complex physical correlations while efficiently handling
+large, high-dimensional spaces. Despite they exhibit both
+local and global adaptability through attention mechanisms,
+Transformers require substantial computational resources,
+especially for large-scale simulations.
+2.2. Accumulation Approaches
+Recent advancements in accumulation techniques for PDE
+solvers improve computational efficiency, memory usage,
+and accuracy in high-resolution simulations.
+MultiScale
+MeshGraphNet [3, 21, 31] employs a multi-scale structure
+to facilitate coarse-to-fine dynamics learning, thereby en-
+hancing its ability to extract meaningful information across
+varying resolutions.
+However, the approach has limita-
+tions in high-dimensional scenarios requiring fine-grained
+accuracy, such as turbulent flow, due to the inherent loss
+of detailed information.
+Comparable methodologies in-
+clude Multi-Grid Neural Operators [2, 27, 30]. Neural Flow
+Maps [5, 7] achieve high accuracy in fluid simulations us-
+ing bidirectional flow maps, but their effectiveness is con-
+strained by spatial sparsity. Fourier PINN [4, 40] improves
+computational efficiency by replacing costly differential op-
+erators with spectral multiplications, while MG-TFNO [13]
+employs Fourier-domain tensor factorization to achieve pa-
+rameter compression and enable parallelization. However,
+these methods exhibit limitations in handling irregular or
+non-uniform simulation domains, as well as in scenarios
+where spectral approaches are less effective.
+3. Methodology
+Traditional methods, such as CNN-based approaches, are
+unable to model long-range interactions effectively, while
+using Transformers with self-attention to model direct inter-
+actions is too slow when handling high-resolution data. In
+order to alleviate the problem, we propose a novel pipeline,
+the AMR-Transformer, which combines Adaptive Mesh
+Refinement (AMR) as a tokenizer with a Transformer-based
+neural solver. Grid-based AMR processing transforms the
+feature domain from the structured grid RH×W ×c, where
+each pixel has c-dimensional features, to a patch represen-
+tation RN×K×c. Here, N denotes the number of patches,
+each patch contains K cells. For adaptive refinement, we
+employ a multi-way tree structure, and the hierarchical
+AMR produces overlapping patches of varying sizes.
+3.1. AMR Tokenizer
+The AMR Tokenizer utilizes an adaptive mesh refinement
+(AMR) strategy based on a hierarchical multi-way tree
+structure to capture multi-scale features in fluid dynamics.
+Refinement decisions are made solely based on the velocity
+field within the input features, without requiring additional
+specific input. For simplicity, we illustrate this process in
+2D using a quadtree structure, which readily generalizes to
+3D with an octree or other multi-way tree structures (Fig-
+ure 3). In this framework, the tokenizer partitions the in-
+put domain I ∈RH×W ×c based on specific physical cri-
+teria, transforming the structured grid into a set of patches
+Ip ∈RN×K×c, where each patch contains K = k × k
+cells, represented as Ip = AMRTokenizer(I). The parame-
+ter k determines the number of subdivisions per dimension,
+directly influencing the resolution of the patches. To en-
+hance computational efficiency, cells are processed in par-
+allel at each depth before moving to the next, significantly
+accelerating the pruning process. The key steps of the AMR
+tokenizer are outlined as follows.
+In the initialization phase, the entire input domain I is
+treated as a single patch with k × k cells for storing or sub-
+dividing according to the pruning criteria. At next each sub-
+sequent depth, regions resulting from the previous depth are
+further processed. The process is outlined as follows: 1) If
+a cell was marked as not to be further subdivided in the pre-
+vious layer, it is no longer processed. For all other cells,
+the Navier-Stokes constraint-aware fast pruning module
+evaluates pruning conditions concurrently. 2) If a cell meets
+the subdivision criteria, then it is both stored (Eq.1) and sub-
+divided in the quadtree structure. 3) Otherwise, it is stored
+without further subdivision. To reasonably control the gran-
+ularity of subdivision, we define the minimum depth s and
+the maximum depth e. Before reaching depth s, all cells are
+subdivided but not stored. Upon reaching depth e, subdivi-
+sion ceases.
+During pruning, the module identifies the positions re-
+quiring subdivision or storage at each depth d. For each cell
+mi (where i = 1, . . . , Md and Md represents the number of
+cells that require storage), we compute an aggregated fea-
+ture along with its positional information (depth d and mean
+coordinates (¯xmi, ¯ymi)) as,
+Cmi =
+
+1
+|mi|
+X
+(x,y)∈mi
+I(x, y), d, ¯xmi, ¯ymi
+
+,
+(1)
+where x and y denote the grid coordinates within mi. The
+information for each cell Cmi is then added directly to the
+cumulative list C, which collects all stored cell information
+across depths.
+
+The cumulative list C is then organized into patches
+by grouping adjacent cells based on their spatial positions.
+This transforms the structured grid into a set of patches Ip.
+This hierarchical patch representation facilitates multi-scale
+analysis in the Transformer pipeline.
+3.2. N-S Constraint-Aware Pruning Module
+The Navier-Stokes constraint-aware pruning module ap-
+plies fast pruning based on specific physical properties that
+are crucial for capturing the complex dynamics of fluid flow.
+By concentrating computational resources in these regions,
+we ensure higher resolution where it matters most, thereby
+enhancing simulation accuracy. The criteria are designed
+for each cell mi to capture unique aspects of fluid motion,
+ranging from localized rapid changes to instability-induced
+turbulence.
+Velocity Gradient: The velocity gradient identifies sharp
+changes in fluid speed typically at boundaries, shock fronts,
+or regions with fine-scale features. For example, in shock-
+wave and dam break scenarios, sudden velocity shifts cre-
+ate high gradients, indicating discontinuities or fronts. We
+compute the gradient magnitude Gmi of cell mi as,
+Gmi =
+1
+|mi|
+Z p
+∇u2 + ∇v2 dmi,
+(2)
+where ∇u and ∇v represent spatial velocity changes. Cap-
+turing these shifts is critical for delineating features like
+shock fronts and complex flow boundaries, strengthening
+the model’s tracking rapid transitions and flow separations.
+Vorticity: The Vorticity ω of cell mi defined as,
+ωmi =
+1
+|mi|
+Z ∂V
+∂x −∂u
+∂y
+
+dmi,
+(3)
+measures local fluid rotation, indicating swirling flows like
+eddies or turbulence. High vorticity often characterizes re-
+gions where rotational motion drives turbulent mixing and
+energy dissipation, as seen in cavity flows or behind cylin-
+drical obstacles. Identifying these zones ensures that vortex
+structures are resolved, supporting a detailed representation
+of rotational flow behavior crucial for understanding energy
+transfer within the fluid.
+Momentum: The momentum identifies regions with signif-
+icant flow that heavily influence the overall dynamics, par-
+ticularly in cases where flow jets or moving currents, such
+as those in tube or dam flows, govern the system’s behavior.
+The momentum Mmi of cell mi is defined as,
+Mmi =
+1
+|mi|
+sZ
+u dmi
+2
++
+Z
+v dmi
+2
+,
+(4)
+where A represents the area of the region being analyzed.
+Capturing momentum-heavy regions enables accurate sim-
+ulation of flow-driving forces, impacting downstream be-
+havior and the interaction of moving fronts with boundaries.
+Kelvin-Helmholtz Instability: The Kelvin-Helmholtz in-
+stability detects shear-driven instabilities, which forms at
+fluid interfaces with significant velocity differentials. Such
+shear instabilities are common in atmospheric flows and can
+be relevant in tube and dam break scenarios, where layers
+of moving fluid interact. The shear strength Smi of cell mi
+defined as,
+Smi =
+1
+|mi|
+Z 
+∂u
+∂y −∂v
+∂x
+ dmi,
+(5)
+helps pinpoint areas prone to instability, allowing the model
+to depict the emergence of wave patterns and subsequent
+turbulence.
+This capability is essential for resolving the
+fine-scale interfacial interactions that contribute to mixing
+and layer formation.
+We define a global set of characteristic physical proper-
+ties Pg = {PG,g, Pω,g, PM,g, PS,g}, where each property
+has an associated threshold factor T = {tG, tω, tM, tS}.
+The values of ti are sampled uniformly over a prede-
+fined range, allowing manual adjustment of the AMR
+pruning parameters post-training to balance accuracy and
+efficiency.
+For a cell mi with properties Pmi
+=
+{PG,mi, Pω,mi, PM,mi, PS,mi}, subdivision is triggered if,
+∃i ∈{G, ω, M, S}
+such that
+Pi,mi > Pi,g · ti.
+(6)
+For Velocity Gradient G, we apply a proportional subdi-
+vision mechanism: if the velocity gradient in mi at the cur-
+rent depth level falls within the top rG percentile of the dis-
+tribution at that level, then mi undergoes subdivision if the
+following holds, where PG,d denotes the distribution of ve-
+locity gradients at the current depth level and Top-rG(PG,d)
+represents the top rG-percentile value of PG,d, as,
+PG,mi ≥Top-rG (PG,d) .
+(7)
+3.3. Transformer Neural Solver
+The neural solver aims to solve the Navier-Stokes equa-
+tions, which describe fluid flow dynamics, to predict the
+state of the flow field, including the velocity field u =
+(u, v), pressure p, density field ρ, and viscosity field ν (as
+applicable), at the next time step t + ∆t, based on the cor-
+responding information at t as,
+∂u
+∂t + (u · ∇)u = −1
+ρ∇p + ν∇2u.
+(8)
+The input domain I ∈RH×W ×c is defined as: Iij =
+{uij, vij, . . . } where the primary components are the ve-
+locity fields uij and vij. Additional channels may include
+other physical fields such as density ρij, viscosity νij, and
+pressure pij, as well as constant parameters that incorporate
+case-specific global attributes. At each time step t, the input
+domain It is processed using an adaptive mesh refinement
+
+1
+S > ��?
+ω > ��?
+M > ��?
+G > ��?
+Pruning
+AMR Tokenizer
+Neural Solver
+State t+∆t
+N-S 
+Constraint
+8.5 8.5
+8.5 8.5
+Storage
+Avg
+Subdivide
+Append
+Transformer
+Encoder
+d=1
+d=2
+d=6
+d=5
+×
+1 2 5 6 1 2 5 6
+3 4 7 8 3 4 7 8
+9 10 13 14 9 10 13 14
+11 12 15 16 11 12 15 16
+1 2 5 6 1 2 5 6
+3 4 7 8 3 4 7 8
+9 10 13 14 9 10 13 14
+11 12 15 16 11 12 15 16
+×
+×
+×
+1/1 100%
+4/4 100%
+13/16 81%
+43/64 67%
+143/256 55%
+d=3
+d=2
+State t
+Continue
+d=3
+d=4
+473/1024 44%
+d1
+1 × 1
+d2
+2 × 2
+d3
+4 × 4
+d4
+8 × 8
+d5
+16 × 16
+d6
+32 × 32
+Tokens reduced by 34%: 1024-677=347
+-66%
+-55%
+-33%
+-19%
+Legend
+Disgarded Cell
+××××
+Failure Criterias
+Passing Cells
+Visualization of Progressive Subdivision from Scale 1×1 to Scale 32×32
+Figure 2. AMR Tokenizer: The AMR tokenizer adaptively partitions the input domain I, where H × W × c represents the full spatial
+resolution of the domain with c channels of features. AMR tokenizer refines the mesh progressively, from low resolution to high resolution,
+depth by depth. At each depth, cells undergo subdivision and storage based on customized Navier-Stokes constraints, including the velocity
+gradient, vorticity, momentum, and Kelvin-Helmholtz instability. Grayscale cells marked with a colored × fail the corresponding physical
+constraint, meaning they are discarded and neither stored nor subdivided. Cells that pass the corresponding physical constraints are marked
+with the color of the most sensitive constraint, and stored and subdivided in the quadtree structure. The stored cells are aggregated by
+averaging (shown as ”Storage (AVG)”), producing a compact multi-resolution representation of the domain. The second row shows the
+mesh results of progressive subdivision at each depth.
+(AMR) tokenizer. This tokenizer generates a refined list of
+patches Ip,t ∈RN×K×(c+3), where each patch contains ag-
+gregated features and positional encodings as,
+Ip,t = AMRTokenizer(It).
+(9)
+The Transformer architecture was chosen for the neural
+solver due to its capability to effectively capture long-range
+interactions through the self-attention mechanism. This fea-
+ture is particularly advantageous for fluid dynamics simula-
+tions, which involve complex, cross-regional dependencies.
+Furthermore, the Transformer can seamlessly handle vary-
+ing numbers of patches N without requiring adjustments for
+different input sizes, unlike cCNNs, which typically rely
+on fixed grid sizes, or GNNs, which require graph-based
+structures. This flexibility allows the Transformer to pro-
+cess all patches simultaneously, naturally adapting to the
+multi-scale representation from the AMR tokenizer. The
+Transformer-based neural solver then predicts the state at
+the next time step t + ∆t, yielding an output Ip,t+∆t ∈
+RN×K×c, as,
+Ip,t+∆t = Transformer(Ip,t).
+(10)
+During training, hyperparameters for the AMR subdivision
+criteria are randomly generated, allowing flexibility in bal-
+ancing accuracy and efficiency.
+We use the normalized
+mean squared error (NMSE) as the loss function to en-
+sure scale consistency across simulations. The training la-
+bels are processed through the AMR Tokenizer to create
+tokenized labels that match the multi-scale representation
+of the model’s output. During testing, the model’s output
+Ip,t+∆t is mapped back onto the original grid for direct
+comparison with the ground truth.
+To further refine the AMR tokenizer’s pruning criteria,
+we define the velocity fields at both the current and previous
+time steps as ut and ut−∆t. Using forward Euler integra-
+tion, we estimate a virtual velocity field u′
+t+∆t as,
+u′
+t+∆t = ut + (ut −ut−∆t),
+(11)
+where u′
+t+∆t serves as an additional input for the AMR to-
+kenizer’s refinement criteria. Both ut and u′
+t+∆t inform the
+AMR decision-making process, and the union of regions
+flagged for refinement based on either field defines the final
+set of regions for subdivision and storage.
+4. Experiment
+We begin with the implementation details in Section 4.1,
+followed by an introduction to the CFDBench and
+PDEBench problems in Section 4.2 and a detailed analy-
+sis of our newly created compressible shockwave dataset in
+Section 4.3. Comparative results between our model and
+current approaches are presented in Section 4.4, with Sec-
+tion 4.5 providing in-depth studies of the computational cost
+and accuracy impacts of the AMR tokenizer. Additional ab-
+lation studies are discussed in Section 4.6.
+
+Figure 3. Visualization of five problems: Each column represents one of the five benchmark problems (Cavity, Cylinder, Dam, Shock-
+wave, and Tube). These visualizations highlight the diversity and complexity of the flow scenarios, from boundary-driven flows in Cavity,
+vortex shedding around the Cylinder, rapid changes in the Dam break, steep gradients in Shockwave, to confined flows in the Tube.
+4.1. Implementation
+Our
+Transformer
+architecture
+utilizes
+PyTorch’s
+nn.TransformerEncoder [20] as the neural solver,
+and the entire model is trained and evaluated on a single
+Nvidia RTX 4090 GPU. The number of epochs is set to
+200 for the dam and shockwave problems, and to 500
+for all other problems.
+For all problems, to adaptively
+refine regions based on physical properties, we set specific
+sampling ranges for each property. The threshold range for
+velocity gradient is uniformly sampled from 0.1 to 2, for
+momentum from 0.5 to 10, for vorticity from 0.2 to 4, and
+for Kelvin-Helmholtz(KH) instability from 0.2 to 4. We
+use a quadtree-based AMR structure with consistent model
+hyperparameters across tasks.
+The Transformer Neural
+Solver includes 4 attention heads, 6 transformer encoder
+layers, a hidden dimension of 256, and a feedforward
+network dimension of 1024. The batch size is set to 128,
+and optimization is performed with the Adam optimizer
+using a warmup-scheduled learning rate defined as,
+lr(t) =
+1
+√dmodel
+· min
+
+t−1
+2 , t · warmup steps−3
+2
+
+, (12)
+where dmodel is set to 256, and warmup steps is 4000.
+For the CFDBench dataset, the input domain I includes
+velocity components u and v, along with global parameters
+like density and viscosity, with an output predicting veloc-
+ity components at the next time step. For the PDEBench
+dataset, the input domain I is similar to the CFDBench
+dataset but without global parameters. For the shockwave
+dataset, I consists of u, v, pressure p, and density ρ, with
+output predictions for all four fields.
+4.2. CFDBench AND PDEBench Benchmark
+We evaluate our model on the seven problems provided in
+CFDBench and PDEBench, and present the visualizations
+in Figure 3:
+• Cylinder: Simulates fluid flow around a stationary cylin-
+der, capturing phenomena like flow separation, boundary
+layer behavior, and periodic vortex shedding. This prob-
+lem has 185 cases with a total of 205,620 frames.
+• Dam: Models the rapid release of water from a column
+collapse, representing free surface flows with complex in-
+teractions and varying flow velocities. It comprises a total
+of 220 cases and 21,916 frames.
+• Tube: Examines a jet flow in a narrow tube, testing the
+model’s ability to simulate confined flow dynamics and
+the formation of boundary layers near the walls. There
+are 175 cases with 39,553 frames.
+• Cavity: Represents driven cavity flow within a closed
+box, where a moving lid induces vortices and complex
+boundary-driven interactions, including a total of 159
+cases and 34,582 frames.
+• Diffusion-Reaction:
+Simulates the interaction of dif-
+fusion and chemical reactions, with substance concen-
+trations evolving over time, including 1000 cases and
+101,000 frames, with 128 × 128 grid.
+• NS-Incom-Inhom: Simulates incompressible, inhomo-
+geneous fluid flow using the Navier-Stokes equations
+with 4 cases and 4000 frames, with 512 × 512 grid.
+These problems cover a variety of flow phenomena, from
+boundary layer effects and vortex shedding to free surface
+and confined flows, allowing for a broad evaluation of the
+AMR-Transformer’s capabilities across fluid dynamics sce-
+narios. However, all problems of CFDBench are generated
+at a low resolution of 64 × 64, with a relatively uniform
+distribution of physical information across the domain.
+4.3. Shockwave Dataset
+To showcase our pipeline’s capability in handling high-
+resolution simulations with uneven physical information
+distribution and capturing long-range dependencies, we in-
+troduce a new dataset, Shockwave, based on the 2D Rie-
+mann problem, specifically Configuration 3 from Kurganov
+and Tadmor [14]. The dataset has a resolution of 128×128,
+four times larger than the 64 × 64 CFDBench datasets, and
+of comparable high resolution to the PDEbench dataset. Ini-
+tial conditions are set as,
+(ρ, u, v, p) =
+
+
+
+
+
+
+
+
+
+(1.5, 0, 0, 1.5),
+if
+x > 0.5, y > 0.5,
+(0.5323, 1.206, 0, 0.3),
+if
+x < 0.5, y > 0.5,
+(0.138, 1.206, 1.206, 0.029),
+if
+x < 0.5, y < 0.5,
+(0.5323, 0, 1.206, 0.3).
+if
+x > 0.5, y < 0.5.
+(13)
+
+Here, ρ represents density, u and v are velocity components
+in the x and y directions, and p is pressure. The compu-
+tational domain is [0, 1]2 with Neumann boundary condi-
+tions, and simulations are run to a final time of t = 0.3. To
+increase variability, random perturbations (up to 20% devi-
+ation) are applied to initial conditions, creating 10 unique
+cases, each with 200 frames and containing u, v, p, and ρ
+for detailed flow representation.
+Compared to CFDBench cases like cylinder and cavity
+flows, which involve relatively simple, steady-state or pe-
+riodic structures, the Shockwave dataset introduces strong
+shocks, sharp discontinuities, and complex, evolving small-
+scale vortex structures, creating a challenging testbed for
+models to capture intricate fluid dynamics.
+4.4. Comparative Analysis with SOTA
+Problem
+Model
+NMSE
+MAE
+MSE
+Dam
+Identity
+3.16E-3
+8.20E-3
+1.69E-3
+U-Net
+3.24E-3
+9.21E-3
+1.70E-3
+FNO
+6.36E-2
+1.02E-1
+2.03E-2
+DeepONet
+3.08E-3
+7.27E-3
+1.64E-3
+Ours
+4.10E-4
+3.24E-3
+1.63E-4
+Cylinder
+Identity
+1.57E-2
+1.09E-1
+7.54E-2
+U-Net
+2.16E-5
+3.09E-3
+5.49E-5
+FNO
+1.78E-5
+3.06E-3
+2.74E-5
+DeepONet
+6.86E-2
+1.27E-1
+5.43E-2
+Ours
+4.12E-5
+2.24E-3
+2.09E-5
+Cavity
+Identity
+1.41E-3
+4.11E-1
+5.95E-1
+U-Net
+4.166E-4
+3.19E-2
+1.58E-2
+FNO
+5.06E-4
+5.69E-2
+1.77E-2
+DeepONet
+1.39E-3
+5.66E-2
+6.38E-2
+Ours
+5.76E-4
+2.47E-2
+4.71E-3
+Tube
+Identity
+1.11E-1
+1.20E-1
+1.64E-1
+U-Net
+3.18E-3
+1.81E-2
+1.29E-3
+FNO
+5.30E-3
+2.39E-2
+1.27E-3
+DeepONet
+6.48E-2
+1.20E-1
+7.23E-2
+Ours
+3.49E-3
+1.13E-2
+1.33E-3
+Shock
+Identity
+7.42E-1
+4.11E-1
+5.95E-1
+U-Net
+7.20E-2
+1.59E-1
+6.21E-2
+FNO
+5.53E-3
+3.53E-2
+4.83E-3
+DeepONet
+6.86E-2
+1.27E-1
+5.43E-2
+Ours
+9.32E-4
+1.71E-2
+9.66E-4
+Diffusion-Reaction
+Identity
+3.11E+1
+8.07E-1
+1.02
+U-Net
+4.72E+1
+8.04E-1
+1.01
+FNO
+8.14E-1
+1.03E-1
+1.76E-2
+DeepONet
+3.09E+1
+8.05E-1
+1.01
+Ours
+8.17E-1
+1.02E-1
+1.75E-2
+NS-Incom-Inhom
+Identity
+1.49E-3
+1.47E-3
+5.61E-4
+U-Net
+1.23E-3
+2.48E-3
+1.50E-5
+FNO
+1.00
+1.14E-1
+4.24E-2
+DeepONet
+5.68E-5
+8.96E-4
+5.88E-6
+Ours
+5.42E-5
+5.87-4
+3.76E-6
+Table 1.
+Performance comparison across models on seven
+problems. The ”Identity” model serves as a baseline reference,
+returning the input as output without any learned modifications.
+We compare the AMR-Transformer with current state-
+of-the-art (SOTA) models, including U-Net [25], FNO [16],
+and DeepONet [19], across all seven problems (cylinder,
+dam, tube, cavity, shockwave, diffusion-reaction and ns-
+incom-inhom). U-Net and FNO are CNN-based architec-
+tures, while DeepONet represents an implicit neural repre-
+sentation approach. The results in Table 1 reveal significant
+improvements for our model. Model-specific hyperparame-
+ters follow the configurations in CFDBench [39], ensuring
+consistency across comparisons.
+Our AMR-Transformer pipeline consistently displays
+strong learning capabilities across all problems, with par-
+ticularly notable improvements in the most challenging sce-
+narios. For the Dam problem, our model achieves a relative
+improvement of approximately 91% on the MSE metric,
+reducing it to 1.63E-4 compared to DeepONet’s 1.64E-3.
+This problem involves complex flow interactions and rapid
+changes that demand a model capable of handling non-local
+features, which our pipeline effectively addresses. Simi-
+larly, in the Shock problem, characterized by steep gradients
+and abrupt transitions, the AMR-Transformer surpasses the
+best alternative, FNO, by approximately 83% on NMSE ,
+showcasing its robust handling of multiscale phenomena.
+In the Cylinder problem, our model’s MAE is reduced
+by approximately 27% compared to FNO, underscoring
+the pipeline’s effectiveness in capturing flow separations,
+reattachments, and eddy-driven energy transfers. Notably,
+the Cylinder problem showcases periodic behaviors, which
+FNO excels at due to its proficiency in learning repetitive
+structures. In the Cavity problem, our model demonstrates
+a substantial improvement in MSE, achieving a reduction
+of 70% compared to FNO, highlighting our model’s preci-
+sion in capturing boundary-driven interactions and vortical
+structures within enclosed flow domains.
+In the Dam and NS-Incom-Inhom problems, the FNO’s
+MAE is 12.4 times and 75.6 times higher than the identity
+baseline, respectively, clearly indicating its inability to learn
+the underlying dynamics of this complex scenario. Simi-
+larly, DeepONet struggles on both Cylinder and Dam prob-
+lems, with performance metrics close to the Identity base-
+line, reflecting its limitations in handling high-gradient and
+complex conditions.
+In the Diffusion-Reaction problem, U-Net and Deep-
+ONet fail to capture the complex variations. In contrast,
+both FNO and our model effectively handle these chal-
+lenges. In the NS-Incom-Inhom problem, characterized by
+complex fluid dynamics and inhomogeneous properties, our
+model outperforms DeepONet by approximately 36% on
+MSE.
+Based
+on
+the
+results
+in
+CFDBench
+[39]
+and
+PDEBench [28],
+we exclude Physics-Informed Neu-
+ral Networks [23] from this comparison, as they did not
+exceed baseline performance in any tested scenario.
+
+4.5. Analysis of AMR tokenizer
+To analyze the impact of the AMR tokenizer, we examine
+its influence on computational cost and accuracy in Table 3.
+Dataset
+Method
+Token Count(N)
+GFLOPs
+Shock
+Regular
+4096
+71.37
+AMR
+970±388
+7.51
+Diffusion-Reaction
+Regular
+4096
+71.37
+AMR
+1296±634
+11.34
+NS-Incom-Inhom
+Regular
+65536
+13607.90
+AMR
+7547±4252
+212.12
+CFDBench
+Regular
+1024
+8.10
+Cylinder
+AMR
+354±212
+2.07
+Cavity
+AMR
+509±367
+3.22
+Dam
+AMR
+347±210
+2.02
+Tube
+AMR
+498±295
+3.13
+Table 2. Computational cost comparison: The table shows the
+average number of tokens generated (with standard deviation) and
+the computational cost in gigaflops (GFLOPs) for each dataset and
+method.
+”CFDBench-Regular” represents four problems simu-
+lated with a regular grid, all having identical computational effi-
+ciency.
+Given the O(N 2) complexity of self-attention, reducing
+the token count results in quadratic reductions in FLOPs.
+For the shockwave dataset, the AMR tokenizer improves
+computational efficiency by nearly 10 times by significantly
+decreasing both token count and FLOPs compared to the
+regular grid (Figure 2). While the regular tokenizer main-
+tains a fixed token count and FLOPs across CFDBench
+datasets, the AMR tokenizer adapts the token count based
+on each problem’s complexity, achieving approximately
+60% to 70% reductions in tokens and 70% to 75% reduc-
+tions in FLOPs. For the PDEBench dataset, the AMR tok-
+enizer achieves reductions of 61% to 88% in tokens, and
+84% to 98% in FLOPs. This adaptive refinement enables
+the AMR tokenizer to focus computational resources on dy-
+namically significant regions, ensuring high efficiency.
+To quantitatively assess the AMR tokenizer’s perfor-
+mance, we apply it to a 1024 × 1024 dataset containing
+velocity fields for shock wave and explosion simulations,
+aimed at generating visually accurate effects (Figure 1).
+The AMR tokenizer achieved a 4 to 10 times reduction in
+token count compared to a 512 × 512 regular grid while
+preserving essential details. Furthermore, it significantly
+improves accuracy, reducing MSE by factors ranging from
+6 to 1000 over the regular grid.
+These results highlight
+the tokenizer’s ability to balance computational efficiency
+with high fidelity in capturing critical features, demonstrat-
+ing its adaptability for high-resolution physical simulations
+and potential applications in visual effect generation.
+4.6. Ablation Study
+The ablation study in Table 3 demonstrates that using in-
+dividual physical properties alone does not achieve opti-
+Physical Property
+Token Pruned
+MSE
+Velocity Gradient
+257
+2.80E-4
+Vorticity
+80
+1.93E-3
+Momentum
+132
+1.12E-3
+KH Instability
+187
+5.40E-4
+Overall
+347
+1.63E-4
+Regular
+1024
+1.36E-4
+Table 3. N-S Constraint-Aware Pruning Module ablation: Pre-
+sentation of the average number of tokens and MSE values for ap-
+plying different physical properties in the dam problem. The ”Reg-
+ular” row represents the results using a standard, non-adaptive to-
+kenizer without N-S constraint-aware pruning.
+mal results in terms of accuracy. In contrast, the ”Over-
+all” method, which incorporates all physical properties,
+markedly enhances accuracy to an MSE of 1.63 × 10−4
+while requiring a moderate increase in token number (347).
+This result highlights that integrating multiple criteria al-
+lows the model to capture a broader spectrum of dynamic
+flow features, leading to improved precision with only a
+slight increase in computational cost.
+Compared to the
+standard, non-adaptive regular tokenizer, which produces
+an MSE of 1.36 × 10−4 with 1024 tokens, our AMR to-
+kenizer achieves a similar simulation accuracy (1.63E-4)
+while using much fewer tokens, illustrating the efficiency
+of constraint-aware adaptive refinement.
+Neural Solver
+MSE
+MAE
+NMSE
+AMR-Transformer
+9.32E-4
+1.71E-2
+9.66E-4
+AMR-MeshGraphNet
+7.38E-2
+1.40E-1
+8.16E-2
+Table 4. Neural Solver comparison: Performance comparison of
+the Transformer and MeshGraphNet on the shockwave problem.
+We conduct an ablation study replacing our Transformer
+with MeshGraphNet [22] in Table 4, configured with a hid-
+den layer dimension of 128, 15 message-passing steps, and
+edges connecting nodes within a radius of 4. The results
+demonstrate the Transformer’s superior accuracy, under-
+scoring its effectiveness in capturing the long-range inter-
+action of the shockwave problem.
+5. Conclusion
+We introduced AMR-Transformer, a novel pipeline that
+leverages Adaptive Mesh Refinement with an Encoder-only
+Transformer to address the challenges of complex fluid
+dynamics simulations. Our approach adaptively allocates
+computational resources to the most complex regions while
+utilizing the Transformer’s self-attention mechanism to cap-
+ture global interactions across scales.
+This combination
+achieves an excellent balance between efficiency and accu-
+racy, making the model well-suited for scenarios that re-
+quire both detailed spatial resolution and effective global
+context modeling.
+
+6. Acknowledgment
+This work was supported by National Science Foundation
+of China (U20B2072, 61976137).
+This work was also
+partially supported by Grant YG2021ZD18 from Shang-
+hai Jiaotong University Medical Engineering Cross Re-
+search.
+This work was partially supported by STCSM
+22DZ2229005.
+References
+[1] Ravichandra Addanki, Peter W Battaglia, David Bud-
+den, Andreea Deac, Jonathan Godwin, Thomas Keck, Wai
+Lok Sibon Li, Alvaro Sanchez-Gonzalez, Jacklynn Stott,
+Shantanu Thakoor, et al. Large-scale graph representation
+learning with very deep gnns and self-supervision.
+arXiv
+preprint arXiv:2107.09422, 2021. 3
+[2] Mathias Anselmann and Markus Bause. A geometric multi-
+grid method for space-time finite element discretizations of
+the navier–stokes equations and its application to 3d flow
+simulation. ACM Transactions on Mathematical Software,
+49(1):1–25, 2023. 3
+[3] Yadi Cao, Menglei Chai, Minchen Li, and Chenfanfu Jiang.
+Bi-stride multi-scale graph neural network for mesh-based
+physical simulation. 2022. 3
+[4] Madison Cooley, Varun Shankar, Robert M Kirby, and Shan-
+dian Zhe. Fourier pinns: From strong boundary conditions
+to adaptive fourier bases. arXiv preprint arXiv:2410.03496,
+2024. 3
+[5] Yitong Deng, Hong-Xing Yu, Diyang Zhang, Jiajun Wu, and
+Bo Zhu. Fluid simulation on neural flow maps. ACM Trans-
+actions on Graphics (TOG), 42(6):1–21, 2023. 2, 3
+[6] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov,
+Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner,
+Mostafa Dehghani, Matthias Minderer, Georg Heigold, Syl-
+vain Gelly, Jakob Uszkoreit, and Neil Houlsby. An image is
+worth 16x16 words: Transformers for image recognition at
+scale. In International Conference on Learning Representa-
+tions, 2021. 2
+[7] N Benjamin Erichson,
+Lionel Mathelin,
+Zhewei Yao,
+Steven L Brunton, Michael W Mahoney, and J Nathan Kutz.
+Shallow neural networks for fluid flow reconstruction with
+limited sensors.
+Proceedings of the Royal Society A, 476
+(2238):20200097, 2020. 3
+[8] Zhou Hang, Yuezhou Ma, Haixu Wu, Haowen Wang, and
+Mingsheng Long. Unisolver: Pde-conditional transformers
+are universal pde solvers. arXiv preprint arXiv:2405.17527,
+2024. 3
+[9] Junyan He, Shashank Kushwaha, Jaewan Park, Seid Koric,
+Diab Abueidda, and Iwona Jasiuk. Sequential deep operator
+networks (s-deeponet) for predicting full-field solutions un-
+der time-dependent loads. Engineering Applications of Arti-
+ficial Intelligence, 127:107258, 2024. 2
+[10] AmirPouya
+Hemmasian
+and
+Amir
+Barati
+Farimani.
+Reduced-order modeling of fluid flows with transformers.
+Physics of Fluids, 35(5), 2023. 3
+[11] AmirPouya Hemmasian and Amir Barati Farimani. Multi-
+scale time-stepping of partial differential equations with
+transformers. Computer Methods in Applied Mechanics and
+Engineering, 426:116983, 2024. 3
+[12] Chunhao Jiang and Nian-Zhong Chen.
+Graph neural net-
+works (gnns) based accelerated numerical simulation. Engi-
+neering Applications of Artificial Intelligence, 123:106370,
+2023. 3
+[13] Jean Kossaifi, Nikola Kovachki, Kamyar Azizzadenesheli,
+and Anima Anandkumar.
+Multi-grid tensorized fourier
+neural operator for high-resolution pdes.
+arXiv preprint
+arXiv:2310.00120, 2023. 3
+[14] Alexander Kurganov and Eitan Tadmor.
+Solution of two-
+dimensional riemann problems for gas dynamics without rie-
+mann problem solvers. Numerical Methods for Partial Dif-
+ferential Equations: An International Journal, 18(5):584–
+608, 2002. 6
+[15] Zongyi Li, Nikola B. Kovachki, Kamyar Azizzadenesheli,
+Burigede Liu, Kaushik Bhattacharya, Andrew M. Stuart, and
+Anima Anandkumar. Neural operator: Graph kernel network
+for partial differential equations.
+CoRR, abs/2003.03485,
+2020. 3
+[16] Zongyi Li, Nikola Borislavov Kovachki, Kamyar Azizzade-
+nesheli, Burigede liu, Kaushik Bhattacharya, Andrew Stuart,
+and Anima Anandkumar. Fourier neural operator for para-
+metric partial differential equations. In International Con-
+ference on Learning Representations, 2021. 2, 3, 7
+[17] Zijie Li, Dule Shu, and Amir Barati Farimani. Scalable trans-
+former for pde surrogate modeling. Advances in Neural In-
+formation Processing Systems, 36, 2024. 3
+[18] Mario Lino, Chris D. Cantwell, Anil Anthony Bharath, and
+Stathi Fotiadis. Simulating continuum mechanics with multi-
+scale graph neural networks. ArXiv, abs/2106.04900, 2021.
+2
+[19] Lu Lu, Pengzhan Jin, Guofei Pang, Zhongqiang Zhang, and
+George Em Karniadakis. Learning nonlinear operators via
+deeponet based on the universal approximation theorem of
+operators. Nature Machine Intelligence, 3:218 – 229, 2019.
+2, 7
+[20] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer,
+James Bradbury, Gregory Chanan, Trevor Killeen, Zeming
+Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison,
+Andreas Kopf, Edward Yang, Zachary DeVito, Martin Rai-
+son, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner,
+Lu Fang, Junjie Bai, and Soumith Chintala. Pytorch: An
+imperative style, high-performance deep learning library. In
+Advances in Neural Information Processing Systems. Curran
+Associates, Inc., 2019. 6
+[21] Roberto Perera and Vinamra Agrawal. Multiscale graph neu-
+ral networks with adaptive mesh refinement for accelerating
+mesh-based simulations. Computer Methods in Applied Me-
+chanics and Engineering, 429:117152, 2024. 3
+[22] Tobias Pfaff, Meire Fortunato, Alvaro Sanchez-Gonzalez,
+and Peter Battaglia. Learning mesh-based simulation with
+graph networks. In International Conference on Learning
+Representations, 2021. 2, 8
+[23] M. Raissi, P. Perdikaris, and G.E. Karniadakis.
+Physics-
+informed neural networks: A deep learning framework for
+solving forward and inverse problems involving nonlinear
+
+partial differential equations.
+Journal of Computational
+Physics, 378:686–707, 2019. 2, 7
+[24] Majid Rasht-Behesht, Christian Huber, Khemraj Shukla,
+and George Em Karniadakis. Physics-informed neural net-
+works (pinns) for wave propagation and full waveform inver-
+sions. Journal of Geophysical Research: Solid Earth, 127
+(5):e2021JB023120, 2022. 2
+[25] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-
+net: Convolutional networks for biomedical image segmen-
+tation. In Medical image computing and computer-assisted
+intervention–MICCAI 2015: 18th international conference,
+Munich, Germany, October 5-9, 2015, proceedings, part III
+18, pages 234–241. Springer, 2015. 2, 7
+[26] Yulia Rubanova, Alvaro Sanchez-Gonzalez, Tobias Pfaff,
+and Peter W. Battaglia. Constraint-based graph network sim-
+ulator. CoRR, abs/2112.09161, 2021. 3
+[27] Suihong Song,
+Tapan Mukerji,
+and Dongxiao Zhang.
+Physics-informed multi-grid neural operator: Theory and an
+application to porous flow simulation. Journal of Computa-
+tional Physics, 520:113438, 2025. 3
+[28] Makoto Takamoto, Timothy Praditia, Raphael Leiteritz, Dan
+MacKinlay, Francesco Alesiani, Dirk Pfl¨uger, and Mathias
+Niepert. Pdebench: an extensive benchmark for scientific
+machine learning. In Proceedings of the 36th International
+Conference on Neural Information Processing Systems, Red
+Hook, NY, USA, 2024. Curran Associates Inc. 2, 7
+[29] Alasdair Tran,
+Alexander Mathews,
+Lexing Xie,
+and
+Cheng Soon Ong. Factorized fourier neural operators. In
+The Eleventh International Conference on Learning Repre-
+sentations, 2023. 3
+[30] Jeroen Wackers, Michel Visonneau, A Serani, R Pellegrini,
+R Broglia, and M Diez. Multi-Fidelity Machine Learning
+from Adaptive-and Multi-Grid RANS Simulations. In 33rd
+Symposium on Naval Hydrodynamics, Ousaka, Japan, 2020.
+3
+[31] Tianyi Wang and Shiguang Liu.
+Multi-scale edge aggre-
+gation mesh-graph-network for character secondary motion.
+Computer Animation and Virtual Worlds, 35(3):e2241, 2024.
+3
+[32] Gege Wen, Zongyi Li, Kamyar Azizzadenesheli, Anima
+Anandkumar, and Sally M Benson.
+U-fno—an enhanced
+fourier neural operator-based deep-learning model for mul-
+tiphase flow.
+Advances in Water Resources, 163:104180,
+2022. 3
+[33] Haixu Wu, Huakun Luo, Haowen Wang, Jianmin Wang,
+and Mingsheng Long.
+Transolver:
+A fast transformer
+solver for pdes on general geometries.
+arXiv preprint
+arXiv:2402.02366, 2024. 3
+[34] Zonghan Wu, Shirui Pan, Fengwen Chen, Guodong Long,
+Chengqi Zhang, and S Yu Philip. A comprehensive survey
+on graph neural networks. IEEE transactions on neural net-
+works and learning systems, 32(1):4–24, 2020. 3
+[35] Chen Xu, Ba Trung Cao, Yong Yuan, and G¨unther Meschke.
+A multi-fidelity deep operator network (deeponet) for fusing
+simulation and monitoring data: Application to real-time set-
+tlement prediction during tunnel construction. Engineering
+Applications of Artificial Intelligence, 133:108156, 2024. 2
+[36] Wuzhe Xu, Yulong Lu, and Li Wang. Transfer learning en-
+hanced deeponet for long-time prediction of evolution equa-
+tions. In Proceedings of the AAAI Conference on Artificial
+Intelligence, pages 10629–10636, 2023. 2
+[37] Zeyi Xu and Yifei Li.
+Learning physical simulation with
+message passing transformer, 2024. 2
+[38] Liu Yang, Xuhui Meng, and George Em Karniadakis. B-
+pinns: Bayesian physics-informed neural networks for for-
+ward and inverse pde problems with noisy data. Journal of
+Computational Physics, 425:109913, 2021. 2
+[39] Luo Yining, Chen Yingfa, and Zhang Zhen. Cfdbench: A
+large-scale benchmark for machine learning methods in fluid
+dynamics. 2023. 2, 7
+[40] Tianchi
+Yu,
+Yiming
+Qi,
+Ivan
+Oseledets,
+and
+Shiyi
+Chen.
+Fourier spectral physics informed neural net-
+work: An efficient and low-memory pinn. arXiv preprint
+arXiv:2408.16414, 2024. 3
+[41] Yangjie Zhou, Jingwen Leng, Yaoxu Song, Shuwen Lu,
+Mian Wang, Chao Li, Minyi Guo, Wenting Shen, Yong Li,
+Wei Lin, et al.
+Ugrapher: High-performance graph oper-
+ator computation via unified abstraction for graph neural
+networks.
+In Proceedings of the 28th ACM International
+Conference on Architectural Support for Programming Lan-
+guages and Operating Systems, Volume 2, pages 878–891,
+2023. 3

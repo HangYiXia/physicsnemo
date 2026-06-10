@@ -73,7 +73,11 @@ def test_linear_gradient_exact():
 
 
 def test_shear_flow_vorticity():
-    """u = y, v = 0  ->  omega = dv/dx - du/dy = -1 ; S = +1 ; G = 1."""
+    """u = y, v = 0  ->  omega = -1 ; G = 1 ; strain-mag S = 1.
+
+    Simple shear = rotation(omega=-1) + strain(S=1); omega and S now DIFFER,
+    confirming the strain magnitude is independent of vorticity.
+    """
     pos, ei = _grid_mesh(20)
     u, v = pos[:, 1], torch.zeros(pos.shape[0])
     q = compute_ns_quantities(u, v, pos, ei)
@@ -84,13 +88,13 @@ def test_shear_flow_vorticity():
 
 
 def test_rotation_vorticity():
-    """u = -y, v = x  ->  omega = 2 ; S = -2."""
+    """u = -y, v = x  ->  omega = 2 ; strain-mag S = 0 (pure rotation)."""
     pos, ei = _grid_mesh(20)
     u, v = -pos[:, 1], pos[:, 0]
     q = compute_ns_quantities(u, v, pos, ei)
     m = _interior_mask(pos)
     assert (q["omega"][m] - 2.0).abs().max() < 5e-2
-    assert (q["S"][m] - (-2.0)).abs().max() < 5e-2
+    assert q["S"][m].abs().max() < 5e-2   # rigid rotation has zero strain
 
 
 def test_uniform_flow_zero_gradient():

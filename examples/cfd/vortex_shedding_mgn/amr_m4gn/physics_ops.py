@@ -6,8 +6,15 @@ which mesh segments must stay fine (active) and which can be merged (calm):
 
     G  : velocity-gradient magnitude  = sqrt(||grad u||^2 + ||grad v||^2)
     omega : vorticity                 = dv/dx - du/dy
-    S  : Kelvin-Helmholtz shear       = du/dy - dv/dx
+    S  : strain-rate magnitude        = sqrt(2 S_ij S_ij), S_ij = sym(grad U)
     M  : momentum indicator           = rho * |U| * area
+
+Note on S: the AMR-Transformer paper defines the KH-shear as (du/dy - dv/dx),
+which is mathematically identical to -omega and therefore redundant once the
+router thresholds on magnitude. We instead use the strain-rate magnitude
+sqrt(2 S_ij S_ij) (symmetric part of grad U), a standard, vorticity-INDEPENDENT
+refinement indicator that is always >= 0. This makes the four indicators
+genuinely independent (see Design Doc 4.6 note).
 
 Gradients on the *unstructured triangle mesh* are estimated with a 1-ring
 weighted least-squares fit (no structured-grid / quadtree assumption), so the
@@ -167,7 +174,13 @@ def compute_ns_quantities(
 
     G = torch.sqrt(du_dx**2 + du_dy**2 + dv_dx**2 + dv_dy**2 + 1e-30)
     omega = dv_dx - du_dy
-    S = du_dy - dv_dx
+    # Strain-rate magnitude S = sqrt(2 S_ij S_ij), with S_ij the symmetric part
+    # of grad(U). In 2D this expands to:
+    #   2 S_ij S_ij = 2 du_dx^2 + 2 dv_dy^2 + (du_dy + dv_dx)^2
+    # Unlike the paper's KH shear (du/dy - dv/dx, which equals -omega and is thus
+    # redundant), the strain magnitude is independent of vorticity (it uses the
+    # SYMMETRIC part du/dy + dv/dx) and is always >= 0, like G and M.
+    S = torch.sqrt(2 * du_dx**2 + 2 * dv_dy**2 + (du_dy + dv_dx)**2 + 1e-30)
 
     if area is None:
         area_t = torch.ones_like(u)
