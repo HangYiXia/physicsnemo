@@ -434,7 +434,9 @@ def main():
     )
     args = parser.parse_args()
 
-    # Create output directory
+    # Save every output (images + cache + log) into a per-case subfolder so runs
+    # with different --case_idx don't overwrite each other.
+    args.output_dir = os.path.join(args.output_dir, f"case{args.case_idx}")
     os.makedirs(args.output_dir, exist_ok=True)
 
     # ---- Tee console output to a plain-text log file (unless disabled) ----

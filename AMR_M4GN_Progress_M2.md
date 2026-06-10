@@ -64,8 +64,9 @@ M2 目标（Design Doc §八 M2）：**算对 4 个物理判据，能区分活�
 - `--plot_physics` 开启后：`compute_node_area` 算面积 → `compute_ns_quantities`（物理速度，无需反归一化）→ 出 `07_physics_fields.png`（2×2：G/ω/M/S）；终端打印每个量的 `min/max/|·|p99`。
 - 配色：ω 用对称发散色标 `RdBu_r`（有正负号）；G/M/S 恒 ≥ 0 用 `viridis`；均按 p99 截断防离群值压扁色阶。
 - **已实现 2 个 M1 遗留告警的修复（尚未实跑确认）**：① `modal_decomp` 把 L、M 统一转 float64，意图消除 ARPACK `M does not have the same type precision` 告警；② 分区配色改用 `matplotlib.colormaps[name].resampled(K)`，意图消除 `get_cmap` 弃用告警。**这两处改动你还没重跑过，是否真的消除告警需你重跑确认。**
+- **新增「按 case_idx 分文件夹保存」**：所有产物（6+1 张图、`partition_cache.pt`、日志 txt）改存到 `<output_dir>/case<case_idx>/` 子目录（如 `partition_vis/case0/`、`partition_vis/case50/`）。这样不同 `--case_idx` 的运行**不再互相覆盖**，可同时保留多个 case 的结果。
 - **新增「终端输出保存为纯文本」功能**（方便你在另一台机器跑完后直接把日志文件发我，免去复制粘贴）：
-  - 默认开启：所有 `print` 内容在显示到终端的同时，写入 `<output_dir>/run_log_case<case_idx>_t<timestep>.txt`（如 `partition_vis/run_log_case0_t300.txt`）。
+  - 默认开启：所有 `print` 内容在显示到终端的同时，写入 `<output_dir>/case<case_idx>/run_log_case<case_idx>_t<timestep>.txt`（如 `partition_vis/case0/run_log_case0_t300.txt`）。
   - 实现方式：一个 `_Tee` 类把 `sys.stdout` 同时指向真实终端和日志文件，每次写入即 flush（**脚本中途崩溃也能留下已产生的日志**），并用 `atexit` 保证退出时关闭文件。
   - 新参数：`--log_file <路径>` 自定义日志文件名/位置；`--no_log` 关闭该功能。
 
@@ -154,18 +155,18 @@ M2 目标（Design Doc §八 M2）：**算对 4 个物理判据，能区分活�
   python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --case_idx 0 --timestep 300 --plot_physics
   ```
 - **得到什么**：
-  - 照常产出 `01`~`06` 图 + **新增 `07_physics_fields.png`**（2×2：G/ω/M/S）；
+  - 在 `partition_vis/case0/` 子目录下产出 `01`~`06` 图 + **`07_physics_fields.png`**（2×2：G/ω/M/S）；
   - 终端 `[1/6]` 行显示 `(timestep 300)`，并打印 4 个量的 `min/max/|·|p99`；
-  - **新增**：终端全部输出自动存到 `partition_vis/run_log_case0_t300.txt`（脚本第一行会打印该日志路径）。**你在另一台机器跑完后，把这个 txt 发我即可，不用复制粘贴终端。**
+  - **新增**：终端全部输出自动存到 `partition_vis/case0/run_log_case0_t300.txt`（脚本第一行会打印该日志路径）。**你在另一台机器跑完后，把这个 txt 发我即可，不用复制粘贴终端。**
   - ARPACK / get_cmap 告警预期已消失（M2 已实现修复，**以这次重跑的终端/日志为准**）。
 - **为什么**：上次用默认 t=0 看不到尾迹（验收点 B/C/D 看似不过）——根因是初始流未发展，不是算子错。带 `--timestep 300` 后涡街已发展，ω 子图应出现圆柱后方红蓝相间的脱涡。
 
-> **关于日志文件**：默认开启，文件名按 `case_idx`/`timestep` 自动区分（多次跑不同参数不会互相覆盖日志）。可用 `--log_file <路径>` 自定义，或 `--no_log` 关闭。
+> **关于输出目录与日志**：每个 `--case_idx` 的产物存到独立子目录 `<output_dir>/case<idx>/`，不同 case 不互相覆盖。日志默认开启、文件名再按 `timestep` 区分；可用 `--log_file <路径>` 自定义，或 `--no_log` 关闭。
 
 ### 步骤 4 — 多看几个 case / 多个时间步（可选但建议）
 
-- **做什么**：换 `--case_idx 1/50/99`、或同一 case 换 `--timestep 100/200/300` 各跑一次（图会覆盖，但日志按参数分文件不覆盖）。
-- **得到什么**：不同 case/时刻的 ω 量级与尾迹形态，以及对应的多份 `run_log_*.txt`。
+- **做什么**：换 `--case_idx 1/50/99`、或同一 case 换 `--timestep 100/200/300` 各跑一次。
+- **得到什么**：`partition_vis/case1/`、`case50/`、`case99/` 等各自独立的图与日志（不同 case 不覆盖；同 case 不同 timestep 的图会覆盖，但日志按 timestep 分文件保留）。
 - **为什么**：确认物理量量级跨 case 稳定（呼应 D2 的「绝对阈值」前提）；若某 case 量级差一个数量级，说明阈值不能用全局绝对值，要回到 Top-r 分位方案。
 
 ---
