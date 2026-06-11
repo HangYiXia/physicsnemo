@@ -4,7 +4,8 @@
 **当前阶段**：M5 — 全量训练 + baseline 对比（批处理 `batch_size>1` → 完整训练入口 → `inference_amr_m4gn` rollout/指标/可视化 → D3 阈值标定）
 **M5 状态**：🚧 **进行中**。M5 较重、分小步推进，**每小步都配可单独验证的单测 + 文档**。
 - 小步 1（批处理注意力隔离）：**单测 3/3 实跑通过**（含跨图不泄漏）。
-- 小步 2（model 批处理集成）：**代码已实现，单测待你实跑**。
+- 小步 2（model 批处理集成）：**单测 2/2 + 单图回归 3/3 实跑通过**（batch==逐图拼接）。
+- 小步 3（完整训练入口）：**代码已实现，待你实跑**（需先 preprocess train split 的若干 case）。
 **前置**：M1/M2/M3 ✅、M4 🟢（端到端管线跑通，overfit NMSE 0.92→0.013）。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§7.2-C 批处理 / §八 M5）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
@@ -20,8 +21,8 @@
 | 小步 | 内容 | 状态 |
 | --- | --- | --- |
 | **1. 批处理注意力隔离** | `pack_segments`/`run_macro_batched`：变长 token 打包成 `[B,Tmax,d]`+mask，Transformer 注意力按图隔离 | ✅ 单测 3/3 通过 |
-| 2. model 批处理集成 | `model.forward` 支持 PyG batch：逐图 route → 全局偏移 token id + `token_batch` → 批处理 transformer | ✅ 实现，单测待实跑 |
-| 3. 完整训练入口 | 把 overfit 脚本扩成正经训练（多 case、checkpoint、lr 调度），复用 `train.py` 框架 | ⬜ 待做 |
+| 2. model 批处理集成 | `model.forward` 支持 PyG batch：逐图 route → 全局偏移 token id + `token_batch` → 批处理 transformer | ✅ 单测 2/2 + 回归 3/3 |
+| 3. 完整训练入口 | 把 overfit 脚本扩成正经训练（多 case、checkpoint、lr 调度），复用 `train.py` 框架 | ✅ 实现，待实跑 |
 | 4. `inference_amr_m4gn.py` | rollout + §6.4 指标 + **预测场可视化**（你想看的图在这里）| ⬜ 待做 |
 | 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ⬜ 待做 |
 
@@ -122,10 +123,65 @@ tests/test_model_batch.py  ✅ 新建：2 例（batch 前向/反向；batch==逐
 
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| batch 集成 | `pytest tests/test_model_batch.py` | 2 passed（含 batch==逐图拼接）| ⏳ 待实跑 |
-| 单图回归 | `pytest tests/test_model.py` | 仍 3 passed | ⏳ 待实跑 |
+| batch 集成 | `pytest tests/test_model_batch.py` | 2 passed（含 batch==逐图拼接）| ✅ **2 passed in 5.02s** |
+| 单图回归 | `pytest tests/test_model.py` | 仍 3 passed | ✅ **3 passed in 4.66s** |
 
-> 跑完发我；通过后进入小步 3（完整训练入口）。
+> 小步 2 闭环（batch==逐图拼接、单图未回归）。进入小步 3（完整训练入口）。
+
+---
+
+## 小步 3 — 完整训练入口（本轮）
+
+### 做了什么
+
+```
+train_amr_m4gn_full.py   ✅ 新建：多 case + PyG batch + checkpoint + lr 调度 + per-channel NMSE
+（train_amr_m4gn.py 保留不动：M4 的单 case overfit 验证脚本）
+```
+
+### 为什么这么设计
+
+- **新建而非改 overfit 脚本**：`train_amr_m4gn.py`（overfit）已验证通过，不动它；完整训练逻辑放新脚本 `train_amr_m4gn_full.py`，职责清晰。
+- **单机单卡、不上 DDP/apex/wandb**：降低你跑通的门槛；模型/数据各部件本身是 DDP-ready 的，真正多卡时再包一层（M7/算力到位）。
+- **batch 取 cache 的关键**：DataLoader 把 B 个图拼成一个 PyG Batch（带 `ptr` 与每图 `gidx`）；训练循环按 `batch.gidx` 取出**对应的 caches 列表**喂给 `AMRM4GN.forward(batch, caches)`（小步 2）。caches 预先全部搬到 device。
+- **阈值**：默认用**固定 ω 阈值**（`--omega_thresh 30`，与 overfit/可视化一致，保证 AMR 真的在合并、可控）；`--sample_thresh` 可切到 Design Doc §4.7 的训练期随机采样（D3 标定时用，留小步 5）。
+
+### 运行步骤（你拿到代码后）
+
+#### 步骤 0 — 同步文件
+`train_amr_m4gn_full.py`（其余 M5 文件此前已同步）。
+
+#### 步骤 1 — 预处理若干 train case（生成缓存）
+- **做什么**：
+  ```bash
+  python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow \
+      --split train --num_cases 4 --out_dir ./amr_cache
+  ```
+- **为什么**：完整训练按 `gidx` 读 `partition_cache_train_{gidx}.pt`；必须先离线生成（几何缓存，与时间步无关）。
+- **应该得到什么**：`./amr_cache/` 下出现 `partition_cache_train_0.pt`〜`_3.pt`，每个打印 `(K0=64, K1=256)`。
+
+#### 步骤 2 — 跑多 case batch 训练（smoke run）
+- **做什么**：
+  ```bash
+  python train_amr_m4gn_full.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow \
+      --cache_dir ./amr_cache --num_cases 4 --num_steps 50 --batch_size 2 \
+      --epochs 50 --omega_thresh 30
+  ```
+- **为什么**：验证「多个算例 + batch_size>1」这条真实训练链路能跑通、loss 在下降、能存 checkpoint——这是 M5 从「单 case overfit」迈向「正经训练」的关键一跳。
+- **应该得到什么**：
+  - 终端打印 `[train] 4 cases x 49 steps, batch_size=2, ...`；
+  - 每 5 epoch 打印 `epoch xxxx  NMSE x.xxxe±xx  lr x.xxe-xx`，**NMSE 总体随 epoch 下降**（多 case 比单 case 难，不会像 overfit 那么低，但应明显下行）；
+  - `./checkpoints_amr/` 下生成 `amr_m4gn_epoch*.pt`。
+- **状态**：⏳ **待你实跑**。
+
+### 验收
+
+| 验收点 | 命令 | 合格判据 | 状态 |
+| --- | --- | --- | --- |
+| 多 case 预处理 | `preprocess_partitions.py --split train --num_cases 4` | 生成 4 个 `partition_cache_train_*.pt` | ⏳ 待实跑 |
+| batch 训练跑通 | `train_amr_m4gn_full.py ... --batch_size 2` | 无报错、NMSE 总体下降、存 checkpoint | ⏳ 待实跑 |
+
+> 跑完把训练日志（NMSE 那几行）发我；通过后进入小步 4（`inference_amr_m4gn.py`：rollout + 指标 + 预测场可视化）。
 
 ---
 
