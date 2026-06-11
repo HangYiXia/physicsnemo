@@ -3,8 +3,8 @@
 **更新日期**：2026年6月11日
 **当前阶段**：M4 — 端到端模型（micro GNN + 段编码 + Macro Transformer + dispatch + 统一 decoder）+ 数据管线 + overfit 单 case
 **M4 状态**：🚧 **进行中**。
-- 第一批（纯模型组件 `micro_gnn`/`macro_transformer`）：**单测 9/9 已实跑通过**。
-- 第二批（`model`/`data_amr`/`preprocess`/`train` + 集成/overfit）：**代码已实现，尚未在你机器上跑过**。
+- 第一批（`micro_gnn`/`macro_transformer`）：**单测 9/9 已实跑通过**。
+- 第二批（`model`/`data_amr`/`preprocess`/`train`）：**集成测试 3/3 通过、预处理生成缓存成功**；**overfit 待实跑**（已修 test-split 缺 stats 的报错，改用 train split）。
 **前置**：M1/M2/M3 已关闭。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§4.3/4.8/4.9、§7.2、§7.4.4~7.4.6、§八 M4）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`（你的运行机：`C:\GitHub\physicsnemo\...`）
@@ -115,11 +115,8 @@ M4 目标（Design Doc §八 M4）：**完整模型在单个 case 上 overfit �
   pytest tests/test_model.py -v
   ```
 - **为什么**：用**合成图 + 合成缓存**（不依赖数据集/预处理）验证 `AMRM4GN` 整条链路串得对——前向出 `[N,3]` 无 NaN、反向**每个参数都有有限梯度**、全折回(T=K0)与全细(T=K1)两种极端都能跑（§7.4.6 集成测试）。
-- **应该得到什么**：**3 passed**：
-  - `test_forward_shape_and_finite`：`pred.shape==(N,3)` 且全有限；
-  - `test_backward_all_params_have_grad`：无参数缺梯度、无 NaN/Inf；
-  - `test_all_folded_and_all_fine_run`：两种极端阈值都正常出 `[N,3]`。
-- **状态**：⏳ **待你实跑**。
+- **应该得到什么**：**3 passed**。
+- **状态**：✅ **你已实跑：3 passed in 4.69s**。
 
 ### 步骤 3 — 离线预处理（生成某 case 的分区缓存）
 
@@ -127,20 +124,24 @@ M4 目标（Design Doc §八 M4）：**完整模型在单个 case 上 overfit �
   ```bash
   python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --num_cases 1 --out_dir ./amr_cache
   ```
-- **为什么**：把「模态分解→分区→RWSE→l1_to_l0→质心→面积」这套**只跟几何有关、与时间步无关**的重计算离线缓存一次，训练时直接读，避免每步重算。（overfit 脚本也能在线现算，此步是为后续多 case/训练准备。）
-- **应该得到什么**：生成 `./amr_cache/partition_cache_test_0.pt`，终端打印类似 `saved ... (K0=64, K1=256)`。
-- **状态**：⏳ **待你实跑**。
+- **为什么**：把「模态分解→分区→RWSE→l1_to_l0→质心→面积」这套**只跟几何有关、与时间步无关**的重计算离线缓存一次。（overfit 脚本也能在线现算，此步是为后续多 case/训练准备，可选。）
+- **应该得到什么**：生成 `./amr_cache/partition_cache_test_0.pt`，终端打印 `saved ... (K0=64, K1=256)`。
+- **状态**：✅ **你已实跑：生成成功（K0=64, K1=256）**。
 
 ### 步骤 4 — overfit 单 case（M4 的核心验收）
 
-- **做什么**：
+- **做什么**（**用 `train` split**，见下「为什么」）：
   ```bash
-  python train_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --case_idx 0 --num_steps 50 --epochs 300 --omega_thresh 30
+  python train_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split train --case_idx 0 --num_steps 50 --epochs 300 --omega_thresh 30
   ```
-  （有缓存可加 `--cache_dir ./amr_cache`；否则脚本会在线 `build_cache`。CPU 可跑，有 GPU 更快。）
-- **为什么**：M4 的退出标准就是「单 case overfit 成功」——这是端到端管线（数据→反归一化→物理量→路由→段编码→Transformer→dispatch→decoder→NMSE→反向）**全链路正确且可学习**的最强证据。
-- **应该得到什么**：终端每 10 epoch 打印一行 `epoch xxxx  NMSE x.xxxe±xx`，**NMSE 应随 epoch 大体单调下降，到几百 epoch 后降到接近 0（明显小于初值，理想 <1e-2 量级）**。若降不下去（卡在某值/震荡/NaN），说明链路有问题，按 §六排查。
-- **状态**：⏳ **待你实跑**。
+  （`--split train` 是默认值，可省略。CPU 可跑，有 GPU 更快。）
+- **为什么**：
+  - M4 退出标准就是「单 case overfit 成功」——这是端到端管线（数据→反归一化→物理量→路由→段编码→Transformer→dispatch→decoder→NMSE→反向）**全链路正确且可学习**的最强证据。
+  - **为什么是 `train` split 而不是 `test`**：`VortexSheddingDataset` 对 **非 train** split 会去 cwd 读 `edge_stats.json`/`node_stats.json`（这俩由 baseline 训练生成），你没跑过 baseline 所以会报 `FileNotFoundError: edge_stats.json`（你上次就是这个错）。而 **`train` split 会自算这两份 stats 并落盘**，无需先跑 baseline。脚本默认 `--noise_std 0` 关掉训练噪声，保证干净 overfit。
+- **应该得到什么**：
+  - 终端先打印 `Preparing the train dataset...`，并在 cwd 生成 `edge_stats.json`/`node_stats.json`（train split 的副产物，正常现象）；
+  - 然后每 10 epoch 打印一行 `epoch xxxx  NMSE x.xxxe±xx`，**NMSE 应随 epoch 大体单调下降、降到明显小于初值（理想 <1e-2 量级）**。降不下去/震荡/NaN 见 §六。
+- **状态**：⏳ **待你实跑**（上次因 test split 缺 json 失败，现已改用 train split）。
 
 > 跑完把 ① `pytest tests/test_model.py` 输出 ② overfit 的 NMSE 那几行发我，我据实回填验收并最终确认 D1。
 
@@ -149,9 +150,9 @@ M4 目标（Design Doc §八 M4）：**完整模型在单个 case 上 overfit �
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
 | A. 组件单测 | `pytest test_micro_gnn.py test_macro_transformer.py` | 9 passed | ✅ 已实跑通过 |
-| B. 集成测试 | `pytest test_model.py` | 3 passed（无 NaN / 全参梯度 / 全折全细）| ⏳ 待实跑 |
-| C. 预处理 | `preprocess_partitions.py` | 生成 `partition_cache_test_0.pt`（K0=64,K1=256）| ⏳ 待实跑 |
-| D. overfit | `train_amr_m4gn.py` | NMSE 单调降至接近 0 | ⏳ 待实跑 |
+| B. 集成测试 | `pytest test_model.py` | 3 passed（无 NaN / 全参梯度 / 全折全细）| ✅ 已实跑通过（3 passed）|
+| C. 预处理 | `preprocess_partitions.py` | 生成 `partition_cache_test_0.pt`（K0=64,K1=256）| ✅ 已实跑通过 |
+| D. overfit | `train_amr_m4gn.py --split train` | NMSE 单调降至接近 0 | ⏳ 待实跑 |
 | D1 最终确认 | （随 D 一起）| 反归一化管线在真实训练里可用（overfit 收敛即证）| ⏳ 待实跑 |
 
 ---
@@ -160,6 +161,7 @@ M4 目标（Design Doc §八 M4）：**完整模型在单个 case 上 overfit �
 
 | 现象 | 先查 | 说明 |
 | --- | --- | --- |
+| `FileNotFoundError: edge_stats.json`（或 node_stats）| `--split` | 非 train split 要读 baseline 生成的 stats json；用 `--split train`（自算 stats、默认值）即可，**已是默认** |
 | `ImportError`/`cannot import name` | 步骤 0 文件是否同步齐全 | `__init__.py` 没同步是历史高频坑 |
 | `RuntimeError: ... on different device` | `train_amr_m4gn.move_cache` | cache 张量与 graph 必须同 device，已用该函数搬运 |
 | overfit NMSE 不降/震荡 | `--omega_thresh`、`--lr` | 阈值让 routing 几乎全细/全粗时学习信号弱；先试 `--omega_thresh 30`、`--lr 1e-3` |

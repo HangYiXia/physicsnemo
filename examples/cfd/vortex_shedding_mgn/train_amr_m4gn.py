@@ -52,7 +52,12 @@ def move_cache(cache: dict, device):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data_dir", type=str, required=True)
-    p.add_argument("--split", type=str, default="test")
+    p.add_argument("--split", type=str, default="train",
+                   help="Use 'train' (default): it self-computes edge/node "
+                        "stats (no baseline run needed). Non-train splits "
+                        "require edge_stats.json/node_stats.json in cwd.")
+    p.add_argument("--noise_std", type=float, default=0.0,
+                   help="Training-noise std; 0 for a clean overfit (default 0).")
     p.add_argument("--case_idx", type=int, default=0)
     p.add_argument("--num_steps", type=int, default=50)
     p.add_argument("--epochs", type=int, default=300)
@@ -74,7 +79,7 @@ def main():
     ds = VortexSheddingDatasetAMR(
         name="amr_overfit", data_dir=args.data_dir, split=args.split,
         num_samples=args.case_idx + 1, num_steps=args.num_steps,
-        cache_dir=args.cache_dir,
+        noise_std=args.noise_std, cache_dir=args.cache_dir,
     )
 
     if args.cache_dir is not None:
