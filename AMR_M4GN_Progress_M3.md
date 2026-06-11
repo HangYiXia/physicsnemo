@@ -7,6 +7,9 @@
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§4.7 Router / §7.4.1 pe / §7.4.3 amr_router / §八 M3）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
 
+> **里程碑总进度**（截至 2026-06-11）：M1 ✅ · M2 ✅ · **M3 ✅** · M4 🟢 · M5 ⬜ · M6 ⬜ · M7 ⬜
+> **文档索引**：M1 `AMR_M4GN_Progress_M1.md` · M2 `..._M2.md` · M3（本文）· M4 `..._M4.md` · 设计 `AMR_M4GN_Design_Doc.md`
+
 > 本文只讲 M3 新增的东西：做了什么、为什么、怎么跑怎么验、决策门 D3 怎么看、M4 注意事项。
 
 ---

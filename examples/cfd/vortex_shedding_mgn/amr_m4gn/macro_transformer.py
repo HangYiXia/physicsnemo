@@ -15,8 +15,9 @@ dispatch : each node takes its token's transformer output and concatenates with
     its own micro feature -> h_cat [N, 2d] (concat, not add, so the decoder
     learns to fuse local + global scales).
 
-M4 runs batch_size=1; batched segment-id offset / padding is M5 (Design Doc
-7.2-C). MacroTransformer still accepts a key_padding_mask for forward-compat.
+Batching (M5, Design Doc 7.2-C): SegmentEncoder/dispatch are batch-ready once
+`kept_assign` uses global contiguous token ids. Per-graph attention isolation
+is handled by `pack_segments` / `run_macro_batched` (pad to [B,Tmax,d] + mask).
 """
 
 from __future__ import annotations
@@ -100,3 +101,53 @@ def dispatch(h_seg_out: Tensor, kept_assign: Tensor, h_node: Tensor) -> Tensor:
     local feature (concat, not add)."""
     h_global = h_seg_out[kept_assign]          # [N, d]
     return torch.cat([h_node, h_global], dim=1)  # [N, 2d]
+
+
+# ---------------------------------------------------------------------------
+# Batched macro transformer (M5)
+# ---------------------------------------------------------------------------
+# SegmentEncoder / dispatch already work for a batch as long as `kept_assign`
+# uses GLOBAL contiguous token ids in [0, T_total) and T = T_total. The only
+# part that must be batch-aware is the transformer's ATTENTION: tokens of one
+# graph must not attend to tokens of another. We pack the variable-length
+# per-graph token sequences into [B, Tmax, d] + key_padding_mask, run the
+# encoder (so attention is confined per graph), then unpack back to [T_total,d].
+#
+# Requirement: `token_batch` is SEGMENTED (tokens of graph 0 first, then graph 1,
+# ...), which is how model.py concatenates per-graph routing results.
+
+
+def pack_segments(h_seg: Tensor, token_batch: Tensor, num_graphs: int | None = None):
+    """[T_total, d] + token_batch[T_total] -> (packed[B,Tmax,d], mask[B,Tmax],
+    index) where mask True = padding. `index` is reused by unpack_segments."""
+    T_total, d = h_seg.shape
+    B = int(token_batch.max()) + 1 if num_graphs is None else num_graphs
+    counts = torch.bincount(token_batch, minlength=B)            # [B]
+    Tmax = int(counts.max())
+    offsets = torch.zeros(B, dtype=torch.long, device=h_seg.device)
+    offsets[1:] = torch.cumsum(counts, 0)[:-1]
+    pos = torch.arange(T_total, device=h_seg.device) - offsets[token_batch]
+    packed = h_seg.new_zeros(B, Tmax, d)
+    mask = torch.ones(B, Tmax, dtype=torch.bool, device=h_seg.device)
+    packed[token_batch, pos] = h_seg
+    mask[token_batch, pos] = False
+    return packed, mask, (token_batch, pos)
+
+
+def unpack_segments(packed: Tensor, index) -> Tensor:
+    """Inverse of pack_segments: [B,Tmax,d] -> [T_total, d]."""
+    token_batch, pos = index
+    return packed[token_batch, pos]
+
+
+def run_macro_batched(macro: "MacroTransformer", h_seg: Tensor,
+                      token_batch: Tensor, num_graphs: int | None = None) -> Tensor:
+    """Per-graph self-attention over a batch of variable-length token sets.
+
+    h_seg [T_total, d], token_batch [T_total] (segmented) -> [T_total, d].
+    Attention is confined within each graph via the padding mask.
+    """
+    packed, mask, idx = pack_segments(h_seg, token_batch, num_graphs)
+    out = macro(packed, key_padding_mask=mask)   # [B, Tmax, d]
+    return unpack_segments(out, idx)
+

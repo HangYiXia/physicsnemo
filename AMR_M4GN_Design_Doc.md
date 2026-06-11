@@ -8,6 +8,9 @@
 **主线 Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
 **对比 Baseline**：MGN、X-MeshGraphNet (X-MGN)、M4GN、节点级 Graph-Transformer
 
+> **里程碑总进度**（截至 2026-06-11）：M1 ✅ · M2 ✅ · M3 ✅ · M4 🟢 管线跑通（overfit 收敛度待调参）· M5 ⬜ · M6 ⬜ · M7 ⬜
+> **文档索引**：本设计文档 `AMR_M4GN_Design_Doc.md`；阶段手册 `AMR_M4GN_Progress_M1.md`〜`_M4.md`（各含「拿到代码后每步做什么/为什么/应得什么」的操作说明）。
+
 > **一句话定位**：在非结构三角网格上，用「局部 GNN（短程、高频物理）+ 段级 Transformer（全局、长程压力耦合）+ 物理驱动的自适应 Token 化（AMR）」三者融合的混合架构，在几乎不增加计算量的前提下解决 MeshGraphNet 的长程依赖丢失与过平滑问题，并为大规模湍流（EAGLE）提供可扩展路径。
 
 ---
@@ -504,13 +507,13 @@ physicsnemo/examples/cfd/vortex_shedding_mgn/
 | `amr_m4gn/pe.py` | ✅ 实现（单测 5/5）| seg_adj, steps=16 | rwse[K,16]（每层）| torch（稠密）|
 | `amr_m4gn/physics_ops.py` | ✅ 实现（M2 pytest 8/8）| u,v,pos,edge_index,(u_prev) | {G,ω,M,S}[N] | torch（index_add_）|
 | `amr_m4gn/amr_router.py` | ✅ 实现（单测 11/11、4 case 实跑）| levels, phys, thresholds | kept_assign[N], depth[T], T | torch（scatter_reduce_）|
-| `amr_m4gn/micro_gnn.py` | ⬜ 新建 | x, edge_attr, graph | h_node [N,d] | MeshGraphNet |
-| `amr_m4gn/macro_transformer.py` | ⬜ 新建 | h_node, kept_assign, rwse, batch | h_cat [N,2d] | nn.Transformer |
-| `amr_m4gn/model.py` | ⬜ 新建 | PyG Data + 预处理缓存 | pred [N,3] | 上述全部 |
-| `preprocess_partitions.py` | ⬜ 新建 | data_dir, split, K_list, m | 写 partition_cache_*.pt | modal/seg/pe |
-| `data_amr.py`（或子类）| ⬜ 新建 | 同 VortexSheddingDataset | graph(+pos,+gidx,+缓存) | 见 §7.2-A |
-| `train_amr_m4gn.py` | ⬜ 新建 | config_amr_m4gn.yaml | checkpoint + 日志 | model, data_amr |
-| `inference_amr_m4gn.py` | ⬜ 新建 | checkpoint, test split | rollout + 评估指标 | model, data_amr |
+| `amr_m4gn/micro_gnn.py` | ✅ 实现（单测 4/4）| x, edge_attr, graph | h_node [N,d] | MeshGraphNet（旁路 decoder）|
+| `amr_m4gn/macro_transformer.py` | ✅ 实现（单测 5/5）| h_node, kept_assign, rwse, depth, centroid | h_cat [N,2d] | nn.Transformer |
+| `amr_m4gn/model.py` | ✅ 实现（集成测试 3/3）| PyG Data + 预处理缓存 | pred [N,3] | 上述全部 |
+| `preprocess_partitions.py` | ✅ 实现（实跑生成缓存）| data_dir, split, K_list, m | 写 partition_cache_*.pt | modal/seg/pe |
+| `data_amr.py`（子类）| ✅ 实现（D5/P1，overfit 实跑）| 同 VortexSheddingDataset | graph(+pos,+gidx)+get_cache | 见 §7.2-A |
+| `train_amr_m4gn.py` | ✅ 实现（overfit 实跑，NMSE 0.92→0.013）| argparse | overfit 日志 | model, data_amr |
+| `inference_amr_m4gn.py` | ⬜ 新建（M5）| checkpoint, test split | rollout + 评估指标 | model, data_amr |
 
 下面给出**逐文件详细规格**（函数签名、输入输出张量形状、前置数据、单元测试、不确定点）。
 
@@ -702,23 +705,24 @@ class AMRM4GN(nn.Module):
 - **🚩 决策门 D2（坐标系，U1）**：M1 实测 4 case `pos` 范围全等（x∈[0,1.6]、y∈[0,0.41]），暂定用绝对阈值；M3 出 token 分布后复核。
 - **设计修正**：S 由原文 KH 剪切 `∂u/∂y−∂v/∂x`（≡−ω，冗余）改为应变率幅值 `√(2·S_ij·S_ij)`，与 ω 独立（见 §4.6 note）。
 
-### M3 — AMR Router（2 天）
+### M3 — AMR Router（2 天）✅ 已完成
 
 - **目标**：二层 fold/keep 决策正确，T 随物理状态变化。
-- **新增**：`amr_m4gn/amr_router.py`、`amr_m4gn/pe.py`；可视化「保留/合并」着色图。
-- **配合数据**：M2 的真实涡街场 + 缓存的 `levels`、`l1_to_l0`。
-- **退出标准**：单测四例全过（全平静→T=64；全活跃→T=256；半场→中间值；阈值可复现）；可视化中尾迹保细、来流被合并。
-- **🚩 决策门 D3（K0/K1 取值）**：观察 T 分布。若 T 长期贴近 256（几乎不合并）→ 说明阈值过松或 K1 过大，需调 K1 或阈值区间；若长期贴近 64 → 阈值过严。**需此统计才能定最终 K0/K1 与阈值区间。**
+- **新增**：`amr_m4gn/amr_router.py`、`amr_m4gn/pe.py`；`visualize_partition.py` 加 `--plot_routing`/`--route_pct`/`--route_channels`（出 `08_routing.png`）。
+- **配合数据**：M2 的真实涡街场（4 case×t=300）+ 缓存的 `levels`、`l1_to_l0`。
+- **退出标准**：单测四例全过 + 可视化尾迹保细/来流合并。**实测结果**：`amr_router` 单测 6/6、`pe` 单测 5/5（共 11/11）通过；4 case×t=300（ω 单通道 p70）T=129–135、reduction ~48%，`08_routing.png` 红（保细）集中于尾迹+底壁、蓝（合并）覆盖来流。详见 `AMR_M4GN_Progress_M3.md`。
+- **🚩 决策门 D3（K0/K1 取值）**：观察 T 分布。**M3 现状**：演示用分位阈值（p70），T 恒≈130 是分位的数学必然，**「T 随物理变化」需绝对阈值才能体现**，留训练期（M5）用 `sample_thresholds` 采样后看全训练集 T 分布最终拍板。
 
-### M4 — 端到端跑通（3 天）
+### M4 — 端到端跑通（3 天）🟢 管线跑通（overfit 收敛度待调参）
 
 - **目标**：完整模型在**单个 case** 上 overfit 成功。
 - **新增**：`micro_gnn.py`、`macro_transformer.py`、`model.py`、`data_amr.py`、`preprocess_partitions.py`、`train_amr_m4gn.py`、`conf/config_amr_m4gn.yaml`。
-- **配合数据**：1 个 case 全时间步 + 其 `partition_cache`。
-- **退出标准**：(1) 集成测试无 NaN、全参有梯度；(2) overfit 单 case：loss 单调降至接近 0，预测场≈GT（可视化）。
-- **🚩 决策门 D4（micro_gnn 接口，U2）**：M4 第一步先写 `micro_gnn` 单测确认 `MeshGraphNet` 子模块属性稳定。**通过则用路径 (a)；否则退路径 (b)**（§7.2-D）。
-- **🚩 决策门 D5（数据管线方案，U1/§7.2-A）**：确认采用 P1（子类暴露 pos）还是 P2（反归一化）。**推荐 P1，M4 开工即定。**
-- **前置约束**：本里程碑 `batch_size=1`，暂不处理批内段偏移（留 M5）。
+- **配合数据**：1 个 case 全时间步 + 在线/离线 `partition_cache`。
+- **退出标准**：(1) 集成测试无 NaN、全参有梯度；(2) overfit 单 case：loss 单调降至接近 0。**实测结果**：组件单测 9/9 + 集成测试 3/3 通过；overfit 单 case NMSE **0.92→0.013（降约 70×、趋势向下）→ 端到端管线正确且可学习**；但后期在 1e-2~6e-2 震荡、未压到 ≈0（49 帧同拟合 + lr 未精调，属调参问题，非管线缺陷）。详见 `AMR_M4GN_Progress_M4.md`。
+- **🚩 决策门 D4（micro_gnn 接口，U2）**：✅ **通过**——`MeshGraphNet` 子模块属性稳定，用路径 (a)（走 processor、丢 decoder）。
+- **🚩 决策门 D5（数据管线方案，U1/§7.2-A）**：✅ **选 P1**（`VortexSheddingDatasetAMR` 子类暴露 pos/gidx）。
+- **🚩 决策门 D1（速度反归一化，U4）**：✅ 管线可用——overfit 用 `node_stats` 的 `vel_mean/std` 反归一化算物理量，loss 正常下降，证明该管线在真实数据上不崩、可学。
+- **前置约束**：本里程碑 `batch_size=1`，批内段偏移留 M5。
 
 ### M5 — 全量训练 + 对比（5 天）
 

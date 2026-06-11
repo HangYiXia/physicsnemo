@@ -17,5 +17,12 @@ from .amr_router import (
 )
 from .pe import rwse_segment, rwse_node
 from .micro_gnn import MicroGNN
-from .macro_transformer import SegmentEncoder, MacroTransformer, dispatch
+from .macro_transformer import (
+    SegmentEncoder,
+    MacroTransformer,
+    dispatch,
+    pack_segments,
+    unpack_segments,
+    run_macro_batched,
+)
 from .model import AMRM4GN
