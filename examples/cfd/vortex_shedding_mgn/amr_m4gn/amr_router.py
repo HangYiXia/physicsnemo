@@ -29,14 +29,17 @@ import torch
 from torch import Tensor
 
 
-# Threshold sampling ranges from AMR-Transformer (Design Doc 4.7). NOTE: these
-# are the paper's ranges; the real calibrated values for this dataset are
-# decision gate D3 (set after looking at the T distribution on real data).
+# Threshold sampling ranges. NOTE on scale (decision gate D3): the paper's
+# ranges are in NORMALIZED units; this dataset's physical |omega| is O(1e2).
+# `omega` was CALIBRATED on real data (calibrate_thresholds.py, M5 step 5:
+# per-seg |omega| p40~p85 over 4 cases) to the physical range below, giving
+# token counts T in a healthy [K0,K1] mid-band. G/M/S still hold the paper's
+# normalized ranges and should be calibrated the same way before use.
 DEFAULT_RANGES = {
-    "G": (0.1, 2.0),
-    "omega": (0.2, 4.0),
-    "M": (0.5, 10.0),
-    "S": (0.2, 4.0),
+    "G": (0.1, 2.0),        # TODO(D3): calibrate to physical scale
+    "omega": (2.83, 25.8),  # calibrated (physical), M5 step 5
+    "M": (0.5, 10.0),       # TODO(D3): calibrate to physical scale
+    "S": (0.2, 4.0),        # TODO(D3): calibrate to physical scale
 }
 
 _KEYS = ("G", "omega", "M", "S")

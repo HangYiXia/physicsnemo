@@ -8,7 +8,8 @@
 - 小步 3（完整训练入口）：**多 case batch 训练实跑通过**——NMSE 3.06→~0.08（降约 35×），checkpoint 已存。
 - 小步 4（inference + 预测可视化）：**实跑通过**——预测场与真值场形态高度吻合（`09_prediction_case0_t25.png`），端到端「训练→推理→可视化」闭环打通。
 - 小步 4b（rollout + 误差曲线）：**实跑通过**——50 步自回归 RMSE 0.107→~0.35 后**平台饱和、不发散**，rollout 机制正确。
-- 小步 5（D3 阈值标定）：**代码已实现，待你实跑**（统计 per-seg |ω| 分布 + T-vs-阈值，给 D3 建议）。
+- 小步 5（D3 阈值标定）：**实跑通过，D3 已拍板**——推荐绝对 ω 阈值≈8.9（T≈164），训练期采样区间 [2.83, 25.8]，K0=64/K1=256 确认合适。
+- 小步 6（放大训练 + baseline 对比）：**脚本已就绪，待你实跑**（小验证档：20 case×100 步×各 200 epoch）。
 **前置**：M1/M2/M3 ✅、M4 🟢（端到端管线跑通，overfit NMSE 0.92→0.013）。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§7.2-C 批处理 / §八 M5）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
@@ -28,7 +29,8 @@
 | 3. 完整训练入口 | 把 overfit 脚本扩成正经训练（多 case、checkpoint、lr 调度），复用 `train.py` 框架 | ✅ 实跑通过（NMSE 3.06→~0.08）|
 | 4. `inference_amr_m4gn.py` | 预测场可视化（pred vs GT + 误差）+ 指标；rollout 后续 | ✅ 实跑通过（预测≈真值）|
 | 4b. rollout + 误差曲线 | 自回归多步 rollout（边界 mask）+ 速度 RMSE-vs-step 曲线 | ✅ 实跑通过（0.107→~0.35 饱和，不发散）|
-| 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ✅ 实现（标定工具），待实跑 |
+| 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ✅ 实跑通过，D3 拍板（ω 阈值≈8.9，区间 [2.83,25.8]）|
+| 6. 放大训练 + baseline 对比 | MGN baseline（同预算）+ rollout 对比脚本；小验证档 20case×100步×200ep | ✅ 脚本就绪，待你实跑训练+对比 |
 
 ---
 
@@ -296,18 +298,95 @@ calibrate_thresholds.py   ✅ 新建：统计 L1 per-seg |ω| 分布 + 扫描绝
 #### 步骤 1 — 跑标定
 - **做什么**：`python calibrate_thresholds.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --num_cases 4 --num_steps 50 --stride 5`
 - **为什么**：用真实数据定 D3——回答「绝对 ω 阈值取多少能让 token 数 T 落在合理区间」「训练期 ω 阈值该在什么范围采样」。
-- **应该得到什么**：
-  - 终端打印 per-segment |ω| 各分位（p10..p99）、**推荐 ω 阈值**（使 mean T≈(K0+K1)/2≈160）、以及建议的训练期 ω 采样区间（p40~p85）；
-  - `./inference_vis/11_threshold_calibration.png`：左 = |ω| 分布直方图（看物理量级），右 = T-vs-ω阈值曲线（标 K0/K1 与推荐点）。
+- **应该得到什么**：终端打印 |ω| 分位 + 推荐阈值 + 采样区间；`11_threshold_calibration.png`（左 |ω| 分布、右 T-vs-阈值）。
+- **实测结果（4 case×t≤49，stride 5）**：
+  - per-seg |ω| 分位：p10=5.2e-3, p30=0.64, **p50=7.6, p70=16.3, p90=33.0, p95=49.1, p99=107.6**；
+  - T-vs-阈值：阈值 0→T≈240、**≈8.9→T≈164**、50→T≈77，覆盖 [77,240] 落在 [K0,K1] 内；min-max 带显示 T 随帧（物理状态）波动。
+- **状态**：✅ **实跑通过**。
+
+### 🚩 D3 结论（已拍板，据真实标定）
+
+| 项 | 结论 | 依据 |
+| --- | --- | --- |
+| **K0 / K1** | **保持 64 / 256** | T 在阈值扫描下覆盖 [77,240]，落在 [64,256] 内，区间用满、不溢出 |
+| **绝对 ω 阈值（测试/演示）** | **≈ 8.9** | 使 mean T≈164（[K0,K1] 中段），活跃区≈尾迹/壁面、合并区≈来流 |
+| **训练期 ω 采样区间** | **[2.83, 25.8]**（≈ p40~p85）| 对应 T 跨度约 [90,175]，模型见过粗/细各种粒度，泛化稳 |
+| **「T 随物理变化」** | **已证实** | 右图 min-max 带显示同一绝对阈值下 T 随帧波动（M3 遗留点闭环）|
+| **物理量级 vs 原文** | 本数据 |ω| 比原文归一化区间 [0.2,4] 高 1~2 个数量级 | 必须用绝对物理阈值，不能照搬原文 |
+| G / M / S 区间 | **待同法标定** | 本步只标定了主判据 ω；G/M/S 用同一工具扩展即可（当前训练/演示主用 ω）|
+
+> **落地**：`amr_router.DEFAULT_RANGES["omega"]` 已据此更新为 **(2.83, 25.8)**（物理尺度）；G/M/S 暂留原文值并注明待标定。注意本标定基于 **4 case×t≤49 的 smoke 数据**，扩大训练规模后应复标确认。
+
+### 验收
+
+| 验收点 | 命令 | 合格判据 | 状态 |
+| --- | --- | --- | --- |
+| D3 标定 | `calibrate_thresholds.py ...` | 出 `11_threshold_calibration.png` + 打印分位/推荐阈值 | ✅ 实跑通过，D3 已拍板 |
+
+> 小步 5 闭环、D3 拍板。**M5 五小步全部实跑通过。** 剩 M5 收尾：放大训练规模（更多 case/epoch + 训练期 noise）后做 rollout 稳定性 + 与 MGN/X-MGN baseline 的正式对比。
+
+---
+
+## 小步 6 — 放大训练 + baseline 对比（本轮：脚本就绪）
+
+### 做了什么
+
+```
+train_mgn_baseline.py   ✅ 新建：MGN baseline，与 AMR 完全同训练条件（同 case/epoch/noise/NMSE/lr）
+compare_baselines.py    ✅ 新建：两 checkpoint → test 同款 rollout → RMSE-vs-step 对比 + 参数量
+（train_amr_m4gn_full.py 已支持 --noise_std / --sample_thresh）
+```
+
+### 为什么这么设计
+
+- **公平对比的关键是「同预算同条件」**：MGN baseline 不用仓库 `train.py`（它是 MSE + hydra/DDP 框架，难严格对齐），而是新写 `train_mgn_baseline.py`，**与 `train_amr_m4gn_full.py` 同数据/同 case 数/同 epoch/同 noise/同 per-channel NMSE/同 lr**，唯一差别是模型（纯 MGN vs AMR-M4GN）。这样 rollout 对比才说明是「架构」带来的差异。
+- **训练期加 noise（`--noise_std 0.02`）**：rollout 稳定性的关键——训练时给输入加噪声，模型学会纠正自身误差，否则自回归会快速发散（baseline 同款技巧）。
+- **rollout 对比用同一函数**：`compare_baselines.rollout_eval(predict_fn, ...)` 对两模型用**完全相同**的自回归流程（边界 mask + 物理积分），只换 `predict_fn`，保证对比公平。
+
+### 选定规模：小验证档（20 case × 100 步 × 各 200 epoch）
+
+目的：先验证「放大后预测/rollout 确实变好」并跑通完整对比流程；确认有价值后再考虑上中/全量档。
+
+### 运行步骤（你拿到代码后，命令均单行）
+
+#### 步骤 0 — 同步文件
+`train_mgn_baseline.py`、`compare_baselines.py`。
+
+#### 步骤 1 — 预处理 20 个 train case
+- **做什么**：`python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split train --num_cases 20 --out_dir ./amr_cache`
+- **为什么**：AMR-M4GN 训练按 gidx 读这些几何缓存。
+- **应该得到什么**：`./amr_cache/partition_cache_train_0.pt`〜`_19.pt`（约 1~2 分钟，每个打印 K0=64/K1=256）。
+
+#### 步骤 2 — 训练 AMR-M4GN（20 case，200 epoch，加 noise）
+- **做什么**：`python train_amr_m4gn_full.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --num_cases 20 --num_steps 100 --batch_size 2 --epochs 200 --noise_std 0.02 --omega_thresh 8.9`
+- **为什么**：用标定的 ω 阈值（8.9）+ 训练噪声做正经训练。
+- **应该得到什么**：NMSE 逐 epoch 下降（比 4-case smoke 更稳）；`./checkpoints_amr/amr_m4gn_epoch199.pt`。
+
+#### 步骤 3 — 训练 MGN baseline（完全同预算）
+- **做什么**：`python train_mgn_baseline.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --num_cases 20 --num_steps 100 --batch_size 2 --epochs 200 --noise_std 0.02`
+- **为什么**：同条件对照组。
+- **应该得到什么**：打印参数量（约 ?M）+ NMSE 下降；`./checkpoints_mgn/mgn_epoch199.pt`。
+
+#### 步骤 4 — 准备 test 缓存（若没有）
+- **做什么**：`python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --num_cases 1 --out_dir ./amr_cache`
+- **应该得到什么**：`partition_cache_test_0.pt`（已有可跳过）。
+
+#### 步骤 5 — 对比 rollout
+- **做什么**：`python compare_baselines.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --amr_ckpt ./checkpoints_amr/amr_m4gn_epoch199.pt --mgn_ckpt ./checkpoints_mgn/mgn_epoch199.pt --split test --case_idx 0 --num_steps 90 --rollout 80 --omega_thresh 8.9`
+- **为什么**：M5 退出标准——在相同预算下看 AMR-M4GN 的 rollout 误差与参数量相对 MGN 的表现。
+- **应该得到什么**：终端打印两模型参数量 + step-1/final/mean 速度 RMSE；`./inference_vis/12_compare_rollout_case0.png`（两条 RMSE-vs-step 曲线）。**期望 AMR-M4GN 的 rollout RMSE ≤ MGN（尤其长程）**，体现全局 Transformer 对长程压力耦合的价值；若没体现，记录下来（可能小规模不够、或需调超参）。
 - **状态**：⏳ **待你实跑**。
 
 ### 验收
 
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| D3 标定 | `calibrate_thresholds.py ...` | 出 `11_threshold_calibration.png` + 打印分位/推荐阈值 | ⏳ 待实跑 |
+| AMR-M4GN 放大训练 | 步骤 2 | NMSE 下降、出 checkpoint | ⏳ 待实跑 |
+| MGN baseline 训练 | 步骤 3 | NMSE 下降、出 checkpoint | ⏳ 待实跑 |
+| rollout 对比 | 步骤 5 | 出 `12_compare_rollout_case0.png` + 指标，AMR 不差于 MGN | ⏳ 待实跑 |
 
-> 跑完把打印的分位数 + 推荐阈值 + 图发我，我据实**回填 D3 结论**（最终 K0/K1 与 `DEFAULT_RANGES` 的 omega 区间），并据此可把 `amr_router.DEFAULT_RANGES` 改成本数据的物理尺度。
+> 跑完把两段训练日志 + 对比图 + 指标发我，据实回填 M5 退出结论（AMR-M4GN vs MGN）。
+> **诚实预期**：小验证档（20 case）规模有限，AMR 的长程优势可能只是初现或不明显；这一步先验证「流程跑通 + 趋势」，是否上更大规模据此再定。
 
 ---
 
@@ -317,5 +396,5 @@ calibrate_thresholds.py   ✅ 新建：统计 L1 per-seg |ω| 分布 + 扫描绝
 | --- | --- |
 | §7.2-C 批内段偏移 + padding mask | 小步 1：`pack_segments`/`run_macro_batched`（本轮）；小步 2：`model` 集成 |
 | §7.6 完整训练/推理入口 | 小步 3 `train_amr_m4gn_full.py`（✅）、小步 4 `inference_amr_m4gn.py`（✅ 待实跑）|
-| §八 M5 退出标准（vs baseline 指标）| 小步 4b（rollout/误差曲线，✅ 待实跑）+ 充分训练后 baseline 对比（待做）|
-| 决策门 D3 最终标定 | 小步 5 `calibrate_thresholds.py`（✅ 待实跑，跑后回填结论）|
+| §八 M5 退出标准（vs baseline 指标）| 小步 6 `train_mgn_baseline.py` + `compare_baselines.py`（✅ 脚本就绪，待实跑训练+对比）|
+| 决策门 D3 最终标定 | 小步 5 `calibrate_thresholds.py`（✅ 已拍板：ω∈[2.83,25.8]，K0/K1=64/256）|
