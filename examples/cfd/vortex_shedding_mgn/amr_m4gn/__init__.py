@@ -18,3 +18,4 @@ from .amr_router import (
 from .pe import rwse_segment, rwse_node
 from .micro_gnn import MicroGNN
 from .macro_transformer import SegmentEncoder, MacroTransformer, dispatch
+from .model import AMRM4GN

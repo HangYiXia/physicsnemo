@@ -1,0 +1,52 @@
+# AMR-M4GN config (M4). The slim overfit trainer (train_amr_m4gn.py) uses
+# argparse; this YAML is the parameter sheet for the full hydra/DDP trainer
+# planned in M5/M7. Inherits the baseline fields from conf/config.yaml.
+
+# data
+data_dir: ./raw_dataset/cylinder_flow/cylinder_flow
+cache_dir: ./amr_cache
+split: test
+
+# training
+batch_size: 1            # M4: single graph; batched segment offsets are M5
+epochs: 300
+num_training_samples: 1  # overfit single case in M4
+num_training_time_steps: 50
+lr: 0.001
+lr_decay_rate: 0.9999991
+loss: nmse               # per-channel NMSE (Design Doc 4.9)
+
+# model dims
+num_input_features: 6
+num_output_features: 3
+num_edge_features: 3
+hidden: 128
+processor_size: 15
+
+# AMR / partition
+K0: 64
+K1: 256
+num_modes: 6
+tau: 1.0
+rwse_steps: 16
+
+# macro transformer
+transformer:
+  layers: 4
+  heads: 8
+  ffn: 512
+
+# routing thresholds (real ranges = AMR-Transformer; calibration = D3).
+# For single-case overfit a fixed absolute omega threshold is used instead.
+amr_thresholds:
+  G: [0.1, 2.0]
+  omega: [0.2, 4.0]
+  M: [0.5, 10.0]
+  S: [0.2, 4.0]
+overfit_omega_thresh: 30.0
+
+# D1: denormalize velocity with node_stats before computing G/omega/M/S
+denormalize_velocity: true
+
+# warm-up (U5): epochs with AMR off (all L1); decided by M5 training curve
+warmup_epochs: 0
