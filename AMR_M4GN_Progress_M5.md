@@ -7,7 +7,8 @@
 - 小步 2（model 批处理集成）：**单测 2/2 + 单图回归 3/3 实跑通过**（batch==逐图拼接）。
 - 小步 3（完整训练入口）：**多 case batch 训练实跑通过**——NMSE 3.06→~0.08（降约 35×），checkpoint 已存。
 - 小步 4（inference + 预测可视化）：**实跑通过**——预测场与真值场形态高度吻合（`09_prediction_case0_t25.png`），端到端「训练→推理→可视化」闭环打通。
-- 小步 4b（rollout + 误差曲线）：**代码已实现，待你实跑**（自回归多步 + 速度 RMSE-vs-step 曲线）。
+- 小步 4b（rollout + 误差曲线）：**实跑通过**——50 步自回归 RMSE 0.107→~0.35 后**平台饱和、不发散**，rollout 机制正确。
+- 小步 5（D3 阈值标定）：**代码已实现，待你实跑**（统计 per-seg |ω| 分布 + T-vs-阈值，给 D3 建议）。
 **前置**：M1/M2/M3 ✅、M4 🟢（端到端管线跑通，overfit NMSE 0.92→0.013）。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§7.2-C 批处理 / §八 M5）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
@@ -26,8 +27,8 @@
 | 2. model 批处理集成 | `model.forward` 支持 PyG batch：逐图 route → 全局偏移 token id + `token_batch` → 批处理 transformer | ✅ 单测 2/2 + 回归 3/3 |
 | 3. 完整训练入口 | 把 overfit 脚本扩成正经训练（多 case、checkpoint、lr 调度），复用 `train.py` 框架 | ✅ 实跑通过（NMSE 3.06→~0.08）|
 | 4. `inference_amr_m4gn.py` | 预测场可视化（pred vs GT + 误差）+ 指标；rollout 后续 | ✅ 实跑通过（预测≈真值）|
-| 4b. rollout + 误差曲线 | 自回归多步 rollout（边界 mask）+ 速度 RMSE-vs-step 曲线 | ✅ 实现，待实跑 |
-| 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ⬜ 待做 |
+| 4b. rollout + 误差曲线 | 自回归多步 rollout（边界 mask）+ 速度 RMSE-vs-step 曲线 | ✅ 实跑通过（0.107→~0.35 饱和，不发散）|
+| 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ✅ 实现（标定工具），待实跑 |
 
 ---
 
@@ -258,16 +259,55 @@ inference_amr_m4gn.py   ✅ 改：加 --rollout K 模式 + run_rollout（多步�
 - **应该得到什么**：
   - 终端打印 `rollout velocity RMSE per step (first/mid/last)`；
   - `./inference_vis/10_rollout_rmse_case0.png`：RMSE-vs-step 曲线。
-  - **诚实预期**：当前是 **4 case×50 epoch 的 smoke 模型**，且 rollout 在**没训过的 test case** 上做泛化，**RMSE 大概率随步数明显上升甚至发散**——这正常，rollout 稳定需要充分训练 + 训练期加 noise（baseline 也靠这个）。本步先验证**机制正确**，稳定性是放大训练后的事。
+  - **诚实预期**：当前是 **4 case×50 epoch 的 smoke 模型**，且 rollout 在**没训过的 test case** 上做泛化，RMSE 会随步数上升。
+- **实测结果（case0 test，rollout 50 步）**：每步速度 RMSE first/mid/last = **0.107 / 0.347 / 0.359**；`10_rollout_rmse_case0.png` 显示 **RMSE 前 ~20 步单调上升、之后平台饱和在 ~0.35，不发散**。
+  - **解读**：rollout 机制正确（自回归 + 边界 mask + 积分均生效）；误差**有界饱和**（边界条件锚定 + 涡街周期性）说明模型没崩——这比"发散"更好。RMSE 0.35（相对来流 |U|~1.5 约 23%）是 smoke 模型水平，充分训练（更多 case/epoch + 训练期加 noise）应明显降低。
+- **状态**：✅ **实跑通过**。
+
+### 验收
+
+| 验收点 | 命令 | 合格判据 | 状态 |
+| --- | --- | --- | --- |
+| rollout 跑通 | `inference_amr_m4gn.py ... --rollout 50` | 出 `10_rollout_rmse_case0.png` + 打印每步 RMSE，无报错 | ✅ 实跑通过（误差有界饱和）|
+
+> 小步 4b 闭环。M5 收尾还剩小步 5（D3 阈值标定）+ 充分训练后的 baseline 对比。
+
+---
+
+## 小步 5 — D3 阈值标定（本轮）
+
+### 做了什么
+
+```
+calibrate_thresholds.py   ✅ 新建：统计 L1 per-seg |ω| 分布 + 扫描绝对 ω 阈值看 T 分布，给 D3 建议
+```
+
+### 为什么这么设计
+
+- **D3 的核心矛盾**：M3 已发现原文阈值区间（`omega:[0.2,4.0]`）是**归一化尺度**，本数据物理 `|ω|~1e2`，直接套用会让 T 恒等于 K1（全不合并）。要定**适合本数据的绝对阈值**，必须先看真实的 per-segment |ω| 分布。
+- **纯物理统计、不需 checkpoint**：物理量只依赖速度场 + 几何，所以标定与模型训练无关，可独立、快速地跑。
+- **方法**：多 case×多帧 → 每帧在 L1 上聚合每段 `max|ω|` → ① 汇总分布给"物理量级"；② 对一组候选绝对 ω 阈值，统计 route 产生的 T（mean/min/max）→ 画 `T-vs-阈值` 曲线，**挑使 T 落在 [K0,K1] 中段的阈值**作为 D3 建议，并据 p40~p85 给训练期采样区间。
+
+### 运行步骤（你拿到代码后）
+
+#### 步骤 0 — 同步文件
+`calibrate_thresholds.py`（依赖已有的 train caches，无需 checkpoint）。
+
+#### 步骤 1 — 跑标定
+- **做什么**：`python calibrate_thresholds.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --num_cases 4 --num_steps 50 --stride 5`
+- **为什么**：用真实数据定 D3——回答「绝对 ω 阈值取多少能让 token 数 T 落在合理区间」「训练期 ω 阈值该在什么范围采样」。
+- **应该得到什么**：
+  - 终端打印 per-segment |ω| 各分位（p10..p99）、**推荐 ω 阈值**（使 mean T≈(K0+K1)/2≈160）、以及建议的训练期 ω 采样区间（p40~p85）；
+  - `./inference_vis/11_threshold_calibration.png`：左 = |ω| 分布直方图（看物理量级），右 = T-vs-ω阈值曲线（标 K0/K1 与推荐点）。
 - **状态**：⏳ **待你实跑**。
 
 ### 验收
 
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| rollout 跑通 | `inference_amr_m4gn.py ... --rollout 50` | 出 `10_rollout_rmse_case0.png` + 打印每步 RMSE，无报错 | ⏳ 待实跑 |
+| D3 标定 | `calibrate_thresholds.py ...` | 出 `11_threshold_calibration.png` + 打印分位/推荐阈值 | ⏳ 待实跑 |
 
-> 跑完把曲线 + RMSE 发我。注意：smoke 模型 rollout 发散是预期，重点是机制跑通。M5 收尾还剩小步 5（D3 阈值标定）+ 充分训练后的 baseline 对比。
+> 跑完把打印的分位数 + 推荐阈值 + 图发我，我据实**回填 D3 结论**（最终 K0/K1 与 `DEFAULT_RANGES` 的 omega 区间），并据此可把 `amr_router.DEFAULT_RANGES` 改成本数据的物理尺度。
 
 ---
 
@@ -278,4 +318,4 @@ inference_amr_m4gn.py   ✅ 改：加 --rollout K 模式 + run_rollout（多步�
 | §7.2-C 批内段偏移 + padding mask | 小步 1：`pack_segments`/`run_macro_batched`（本轮）；小步 2：`model` 集成 |
 | §7.6 完整训练/推理入口 | 小步 3 `train_amr_m4gn_full.py`（✅）、小步 4 `inference_amr_m4gn.py`（✅ 待实跑）|
 | §八 M5 退出标准（vs baseline 指标）| 小步 4b（rollout/误差曲线，✅ 待实跑）+ 充分训练后 baseline 对比（待做）|
-| 决策门 D3 最终标定 | 小步 5（待做）|
+| 决策门 D3 最终标定 | 小步 5 `calibrate_thresholds.py`（✅ 待实跑，跑后回填结论）|
