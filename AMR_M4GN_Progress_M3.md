@@ -2,7 +2,7 @@
 
 **更新日期**：2026年6月11日
 **当前阶段**：M3 — AMR Router（二层 fold/keep token 路由）+ 段级/节点级 RWSE 位置编码 + 路由可视化
-**M3 状态**：✅ **单测已实跑通过（11/11），路由在 case0×t=300 真实涡街场上跑通**。可视化已暴露并处理一个演示阈值问题（见 §四 D3）。仅在 1 个 case（case0）上看过路由图，跨 case 复看可选。
+**M3 状态**：✅ **单测 11/11 实跑通过；路由在 4 case×t=300 真实涡街场跑通**，`08_routing.png` 显示尾迹/壁面保细、来流合并（reduction ~48%）。验收 A/B/C 闭环；D 的「T 在中段」已确认，但「T 随物理变化」属绝对阈值场景，留 D3/训练期（见 §四）。**M3 核心目标达成。**
 **前置**：M1、M2 已关闭（M2 验收见 `AMR_M4GN_Progress_M2.md`）。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§4.7 Router / §7.4.1 pe / §7.4.3 amr_router / §八 M3）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
@@ -52,6 +52,7 @@ M3 目标（Design Doc §八 M3）：**二层 fold/keep 决策正确、token 数
 
 **关键设计决策**：
 1. **父子映射靠「嵌套性质」而非内部 offset**：`segmentation.build_partition_tree` 的 L1 是在每个 L0 段内部再 METIS 细分，所以同一 L1 段所有节点的 L0 标签相同。`l1_to_l0[L1_assign] = L0_assign` 单次赋值即得，稳健、不依赖 segmentation 的实现细节。
+   > **已知前提**：`route` 的折回编号假设 L1 标签 `0..K1-1` **连续且非空**（METIS 输出保证；真实数据日志 `Level 1: 256 segments` 已确认）。若出现空 L1 段，其父映射为 −1、会误索引——本数据集不触发，故未加额外保护。M5 若改 K/τ 导致空段需补判 `p<0`。
 2. **取 `max|·|` 而非 mean**：一个段只要局部有强信号（尾迹涡核穿过）就该细分，max 比 mean 更敏感、更符合「宁可多留不可漏」。ω 取绝对值（有正负），G/M/S 恒 ≥ 0。
 3. **纯 torch（`scatter_reduce_`），不引入 `torch_scatter`**：与 `physics_ops.py` 风格一致，零额外依赖。
 4. **`route` 里 token 编号用一个 K1 次的循环**：K1≤256 极小，循环换可读性；连续编号逻辑清晰、无歧义。
@@ -90,10 +91,22 @@ M3 目标（Design Doc §八 M3）：**二层 fold/keep 决策正确、token 数
 - 健康区间：T 落在 64~256 中段，且红色（保细）集中在尾迹/壁面、蓝色（合并）覆盖来流。
 
 **case0×t=300 实测发现（真实数据）**：
-- 第一次用「全部 4 通道并集 + p70」跑出 `T=196，reduction 仅 23.4%`，`08_routing.png` 里来流大片仍是红（保细），合并不足。
+- 第一次用「全部 4 通道并集 + p70」跑出 `T=196，reduction 仅 23.4%`，`08_routing.png` 里来流大片仍是红（保细），合并不足。（**该次为上一版运行，其日志/图已被下方 ω 单通道重跑覆盖；T=196 数字凭当时终端输出记录。**）
 - **根因**：`M=ρ·|U|·area` 在来流也不小（来流速度大），p70 阈值把大片平静来流标成活跃 → 红色铺太广。**这不是 router 的 bug**（逻辑单测全过），而是「演示用哪些通道判活跃」的策略问题，**正是 D3 要观察的现象**。
-- **处置**：给 `--plot_routing` 加 `--route_channels`（默认 **只用 `omega`**，涡量最干净地标尾迹；M 默认排除）。`route` 本身仍支持 4 通道并集（忠于 §4.7），这只改演示图。用 ω 单通道时尾迹保细、来流合并应明显更干净、reduction 更高。
-- **给 M5/D3 的提示**：真实阈值标定时，4 通道并集要小心 M 通道把来流拉成活跃；可能需对 M 用更高分位、或在 router 里对 M 单独设更松的触发。
+- **处置**：给 `--plot_routing` 加 `--route_channels`（默认 **只用 `omega`**，涡量最干净地标尾迹；M 默认排除）。`route` 本身仍支持 4 通道并集（忠于 §4.7），这只改演示图。
+- **ω 单通道重跑结果（4 case×t=300，真实数据）**：
+
+  | case | ω 阈值(p70) | T | kept fine | folded | reduction |
+  | --- | --- | --- | --- | --- | --- |
+  | 0 | 32.6 | 133 | 77 | 56 | 48.0% |
+  | 1 | 23.7 | 131 | 77 | 54 | 48.8% |
+  | 50 | 30.5 | 135 | 77 | 58 | 47.3% |
+  | 99 | 9.75 | 129 | 77 | 52 | 49.6% |
+
+  `08_routing.png` 里红（保细）集中在圆柱尾迹 + 底壁剪切层，蓝（合并）覆盖大片来流，符合「尾迹保细、来流合并」。reduction 从 4 通道并集的 23% 升到 ~48%。
+
+- **⚠️ 关于「T 是否随物理状态变化」的诚实说明**：上表 4 case 的 `kept fine` **都是 77**、T 都≈130——这是**分位阈值（p70）的数学必然**：固定取每层 |ω| 的前 30% 段为活跃，与物理量级无关（看 ω 阈值随 case 从 9.75 到 32.6 自适应浮动即知）。因此**当前演示并不能证明「T 随物理状态变化」**。要观察 T 真正随物理浮动，必须用**绝对阈值**（同一阈值套不同 case/时刻）——那是 D3/训练期阈值采样要做的，**M3 演示阶段尚未验证这一点**。
+- **给 M5/D3 的提示**：① 真实标定用绝对阈值，4 通道并集要小心 M 通道把来流拉成活跃（来流动量也高）；② 届时再看整训练集的 T 分布定 K0/K1 与区间。
 
 > **注意**：`--plot_routing` 用的是**数据相对阈值**（`--route_pct`，默认所选通道取该层 per-segment |phys| 的 70 分位），只是为了让 M3 在**未标定**时也能出一张有意义的演示图。**真正的 D3 拍板要到 M5 训练期阈值采样后**，看整个训练集的 T 分布再定 K0/K1 与区间。
 
@@ -110,7 +123,7 @@ M3 目标（Design Doc §八 M3）：**二层 fold/keep 决策正确、token 数
 | `amr_m4gn/amr_router.py` | 新增 |
 | `amr_m4gn/pe.py` | 新增 |
 | `amr_m4gn/__init__.py` | 修改（导出 router/pe）|
-| `visualize_partition.py` | 修改（`--plot_routing`、`--route_pct`、`08_routing.png`）|
+| `visualize_partition.py` | 修改（`--plot_routing`、`--route_pct`、`--route_channels`、`08_routing.png`）|
 | `tests/test_amr_router.py` | 新增 |
 | `tests/test_pe.py` | 新增 |
 
@@ -123,7 +136,7 @@ pytest tests/test_amr_router.py tests/test_pe.py -v
 
 - **得到什么**：router 6 个 + pe 5 个单测结果。
 - **为什么**：先在合成数据上验证路由逻辑与 RWSE 的正确性，不依赖真实网格。
-- **状态**：⏳ **待你实跑确认**（开发机无 torch，我未实跑 pytest）。
+- **状态**：✅ **已实跑：11 passed in 1.63s**。
 
 ### 步骤 2 — 在真实涡街场上跑路由可视化
 
@@ -133,7 +146,7 @@ python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_fl
 
 - **得到什么**：除 M2 的 7 张图外，多出 **`08_routing.png`**（上：保细/合并红蓝图；下：token id 图）；终端打印 `Tokens T = ...`、活跃/折回段数、reduction%。
 - **为什么**：肉眼确认「尾迹保细、来流被合并」（M3 退出标准），并产出 D3 统计。
-- **状态**：⏳ **待你实跑确认**。
+- **状态**：✅ **已实跑（4 case×t=300，ω 单通道 p70）**，见 §四 D3 表。
 
 ### 验收清单（M3 退出标准，Design Doc §八 M3）
 
@@ -141,10 +154,10 @@ python visualize_partition.py --data_dir ./raw_dataset/cylinder_flow/cylinder_fl
 | --- | --- | --- | --- |
 | **A. router 单测** | `pytest test_amr_router.py` | 全平静→T=K0=64；全活跃→T=K1=256；半场→64<T<256；阈值采样在区间内且可复现 | ✅ 6/6 通过（含规格 4 例）|
 | **B. pe 单测** | `pytest test_pe.py` | 链状端点回归<中间；全连接近似相等；P 行和=1 | ✅ 5/5 通过（含规格 3 例）|
-| **C. 路由可视化** | `08_routing.png` | 尾迹/壁面保细（红）、来流被合并（蓝）| ⏳ 第一版（4 通道并集）尾迹保细 ✅ 但来流合并不足（M 通道污染，见 §四）；已默认改用 ω 单通道，**待你重跑确认来流干净合并** |
-| **D. T 统计（D3）** | 终端 `Tokens T=` | T 落在 [64,256] 中段、随物理状态变化 | ✅ case0 实测 T=196（4 通道并集）；ω 单通道重跑后预计 T 更小、reduction 更高 |
+| **C. 路由可视化** | `08_routing.png` | 尾迹/壁面保细（红）、来流被合并（蓝）| ✅ ω 单通道重跑（4 case）：红集中在圆柱尾迹+底壁剪切层，蓝覆盖大片来流，reduction ~48%（4 通道并集版的 23% 已弃用）|
+| **D. T 统计（D3）** | 终端 `Tokens T=` | T 落在 [64,256] 中段 | ✅ 4 case T=129–135，落中段。**但「随物理状态变化」未验证**：分位阈值下 kept fine 恒=77（top 30%），T 必然稳定；要看 T 随物理浮动需绝对阈值（D3/训练期），见 §四诚实说明 |
 
-> 合计 `pytest tests/test_amr_router.py tests/test_pe.py -v` → **11 passed in 1.63s**（你实跑）。A/B 已闭环；C 待用 ω 单通道重跑确认；D 已有真实数据。
+> 合计 `pytest tests/test_amr_router.py tests/test_pe.py -v` → **11 passed in 1.63s**（你实跑）。A/B/C 已闭环；D 的「T 在中段」已确认，但「随物理变化」属绝对阈值场景，留 D3/训练期。
 
 ---
 

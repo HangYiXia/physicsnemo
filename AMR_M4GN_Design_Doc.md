@@ -290,7 +290,7 @@ Step 2  活跃判定（满足任一即活跃）：
 Step 3  分配最终 token：
         活跃 L1 段 → 保持独立 token（细粒度）
         平静 L1 段 → 折回 L0 父段（兄弟合并为 1 token）
-输出：变长 token 数 T（64 ≤ T ≤ 256），kept_assign[N], kept_depth[N]
+输出：变长 token 数 T（64 ≤ T ≤ 256），kept_assign[N]（每节点 token id），kept_depth[T]（每 token 深度，1=细 L1 / 0=折回 L0；每节点深度 = kept_depth[kept_assign]）
 ```
 
 **阈值采样机制**（AMR-Transformer 的巧妙设计）：
@@ -501,9 +501,9 @@ physicsnemo/examples/cfd/vortex_shedding_mgn/
 | --- | --- | --- | --- | --- |
 | `amr_m4gn/modal_decomp.py` | ✅ | edge_index, pos, node_type, cells, m=6 | f_md [N,6], eigvals | scipy.eigsh |
 | `amr_m4gn/segmentation.py` | ✅ | edge_index, pos, f_md, f_obs, K=[64,256], τ | levels=[L0,L1], seg_adj | pymetis/谱聚类 |
-| `amr_m4gn/pe.py` | ✅ 实现（单测待跑）| seg_adj, steps=16 | rwse[K,16]（每层）| torch（稠密）|
+| `amr_m4gn/pe.py` | ✅ 实现（单测 5/5）| seg_adj, steps=16 | rwse[K,16]（每层）| torch（稠密）|
 | `amr_m4gn/physics_ops.py` | ✅ 实现（M2 pytest 8/8）| u,v,pos,edge_index,(u_prev) | {G,ω,M,S}[N] | torch（index_add_）|
-| `amr_m4gn/amr_router.py` | ✅ 实现（单测待跑）| levels, phys, thresholds | kept_assign[N], depth[N], T | torch（scatter_reduce_）|
+| `amr_m4gn/amr_router.py` | ✅ 实现（单测 11/11、4 case 实跑）| levels, phys, thresholds | kept_assign[N], depth[T], T | torch（scatter_reduce_）|
 | `amr_m4gn/micro_gnn.py` | ⬜ 新建 | x, edge_attr, graph | h_node [N,d] | MeshGraphNet |
 | `amr_m4gn/macro_transformer.py` | ⬜ 新建 | h_node, kept_assign, rwse, batch | h_cat [N,2d] | nn.Transformer |
 | `amr_m4gn/model.py` | ⬜ 新建 | PyG Data + 预处理缓存 | pred [N,3] | 上述全部 |
@@ -569,13 +569,17 @@ def virtual_step(u_t, u_prev) -> Tensor:        # u' = u_t + (u_t − u_prev)
 def aggregate_per_segment(phys: dict, assign: Tensor[N],
                           num_seg: int, reduce="max") -> dict:  # 每段 max|·|
 
-def sample_thresholds(ranges: dict, training: bool, fixed: dict=None) -> dict:
-    """训练随机采样；测试固定。ranges 见 §4.7。"""
+def sample_thresholds(ranges: dict, training: bool, fixed: dict=None,
+                      generator=None) -> dict:
+    """训练随机采样（可传 seeded generator 复现）；测试固定/取区间中点。见 §4.7。"""
 
-def route(levels: list, phys: dict, thresholds: dict
-          ) -> tuple:   # → (kept_assign[N], kept_depth[N], T:int, token_batch)
-    """L1 活跃段保留；平静段折回 L0 父段；返回连续 token id 与每 token 深度。"""
+def route(levels: list, phys: dict, thresholds: dict, reduce="max"
+          ) -> tuple:   # → (kept_assign[N], kept_depth[T], T:int, token_batch[T])
+    """L1 活跃段保留；平静段折回 L0 父段；返回连续 token id、每 token 深度
+       （kept_depth 为 per-token [T]；per-node 深度 = kept_depth[kept_assign]）。"""
 ```
+
+- **实现状态（M3）**：已实现并实跑——单测 11/11 通过；4 case×t=300 真实路由 T=129–135、reduction ~48%。`kept_depth` 实现为 per-token `[T]`（与 `token_batch[T]` 配套、供 SegmentEncoder 取 depth）。
 
 - **输入来源**：`levels=[L0_assign,L1_assign]`（缓存）；`phys` 来自 `physics_ops`；阈值来自 `sample_thresholds`。
 - **关键设计点**：需建立 `L1→L0` 父子映射（离线缓存 `l1_to_l0 [K1]`）。`route` 输出 `kept_assign[i]`∈[0,T) 为节点最终 token id，连续编号。
