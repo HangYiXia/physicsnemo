@@ -3,7 +3,8 @@
 **更新日期**：2026年6月11日
 **当前阶段**：M5 — 全量训练 + baseline 对比（批处理 `batch_size>1` → 完整训练入口 → `inference_amr_m4gn` rollout/指标/可视化 → D3 阈值标定）
 **M5 状态**：🚧 **进行中**。M5 较重、分小步推进，**每小步都配可单独验证的单测 + 文档**。
-- 小步 1（批处理注意力隔离）：**代码已实现，单测待你实跑**。
+- 小步 1（批处理注意力隔离）：**单测 3/3 实跑通过**（含跨图不泄漏）。
+- 小步 2（model 批处理集成）：**代码已实现，单测待你实跑**。
 **前置**：M1/M2/M3 ✅、M4 🟢（端到端管线跑通，overfit NMSE 0.92→0.013）。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§7.2-C 批处理 / §八 M5）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
@@ -18,8 +19,8 @@
 
 | 小步 | 内容 | 状态 |
 | --- | --- | --- |
-| **1. 批处理注意力隔离** | `pack_segments`/`run_macro_batched`：变长 token 打包成 `[B,Tmax,d]`+mask，Transformer 注意力按图隔离 | ✅ 实现，单测待实跑 |
-| 2. model 批处理集成 | `model.forward` 支持 PyG batch：逐图 route → 全局偏移 token id + `token_batch` → 批处理 transformer | ⬜ 待做 |
+| **1. 批处理注意力隔离** | `pack_segments`/`run_macro_batched`：变长 token 打包成 `[B,Tmax,d]`+mask，Transformer 注意力按图隔离 | ✅ 单测 3/3 通过 |
+| 2. model 批处理集成 | `model.forward` 支持 PyG batch：逐图 route → 全局偏移 token id + `token_batch` → 批处理 transformer | ✅ 实现，单测待实跑 |
 | 3. 完整训练入口 | 把 overfit 脚本扩成正经训练（多 case、checkpoint、lr 调度），复用 `train.py` 框架 | ⬜ 待做 |
 | 4. `inference_amr_m4gn.py` | rollout + §6.4 指标 + **预测场可视化**（你想看的图在这里）| ⬜ 待做 |
 | 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ⬜ 待做 |
@@ -72,9 +73,59 @@ tests/test_batched_macro.py     ✅ 新建：3 个单测（pack/unpack 往返、
 
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| 批处理打包/隔离 | `pytest tests/test_batched_macro.py` | 3 passed（含跨图不泄漏）| ⏳ 待实跑 |
+| 批处理打包/隔离 | `pytest tests/test_batched_macro.py` | 3 passed（含跨图不泄漏）| ✅ **3 passed in 4.80s** |
 
-> 跑完把输出发我；通过后进入小步 2（`model.forward` 批处理集成）。
+> 小步 1 闭环。进入小步 2（`model.forward` 批处理集成）。
+
+---
+
+## 小步 2 — `model.forward` 批处理集成（本轮）
+
+### 做了什么
+
+```
+amr_m4gn/model.py          ✅ 改：forward 支持 PyG batch（cache 传 list[dict]）
+tests/test_model_batch.py  ✅ 新建：2 例（batch 前向/反向；batch==逐图拼接）
+```
+
+### 为什么这么设计（数据流）
+
+一个 batch 是 `B` 个图用 `Batch.from_data_list` 拼成的大图（节点全局偏移、`graph.ptr` 标各图节点范围、边**不跨图**）。`forward(graph, caches, ...)` 里：
+1. **micro 一次跑整个 batch**：`h_node[N_total,d]`（MeshGraphNet 消息传递不跨图，等价逐图）。
+2. **物理量一次全局算**：把各图 cache 的 `pos`/`area` 拼接，配 batched `edge_index` 一次 `compute_ns_quantities`（边不跨图 → 等价逐图）。
+3. **路由逐图做**：对每个图 `b`，用 `ptr` 切出它的 `phys_b`，调已验证的 `route(levels_b, phys_b, thr)`，得局部 `kept_assign_b∈[0,T_b)`；**token id 全局偏移** `+= tok_off`，并记 `token_batch=b`。
+4. **段编码用全局 id**：`SegmentEncoder` 一次 mean-pool（全局连续 id，等价逐图）。
+5. **Transformer 按图隔离**：`run_macro_batched`（小步 1）→ 各图 token 互不 attend。
+6. **dispatch + decoder** 全局出 `[N_total,3]`。
+
+> **单图路径保持与 M4 完全等价**：`cache` 传单 dict 时 `B=1`，走 `self.macro(h_seg)`（与 M4 同一行），`test_model.py` 不受影响。
+
+### 运行步骤（你拿到代码后）
+
+#### 步骤 0 — 同步文件
+`amr_m4gn/model.py`、`tests/test_model_batch.py`。
+
+#### 步骤 1 — 跑 batch 集成单测
+- **做什么**：
+  ```bash
+  pytest tests/test_model_batch.py -v
+  # 顺带回归单图：pytest tests/test_model.py -v
+  ```
+- **为什么**：验证 batch 路径正确，且**批处理结果逐字节等于把每个图单独前向再拼接**——这同时证明「跨图不泄漏」和「单图/批处理一致」。
+- **应该得到什么**：`test_model_batch.py` **2 passed**：
+  - `test_batch_forward_finite_and_grad`：`pred[N_total,3]` 全有限、反向全参有梯度；
+  - `test_batch_equals_per_graph`：`batch 前向 == [图0前向; 图1前向]`（`allclose`）。
+  - （回归）`test_model.py` 仍 **3 passed**（单图路径未变）。
+- **状态**：⏳ **待你实跑**。
+
+### 验收
+
+| 验收点 | 命令 | 合格判据 | 状态 |
+| --- | --- | --- | --- |
+| batch 集成 | `pytest tests/test_model_batch.py` | 2 passed（含 batch==逐图拼接）| ⏳ 待实跑 |
+| 单图回归 | `pytest tests/test_model.py` | 仍 3 passed | ⏳ 待实跑 |
+
+> 跑完发我；通过后进入小步 3（完整训练入口）。
 
 ---
 

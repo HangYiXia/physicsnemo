@@ -14,7 +14,8 @@ Wires the pieces (Design Doc 4.x / 7.4.6):
     pred   = decoder(h_cat)                                # [N, 3] = (du, dv, p)
 
 `cache` is the per-case dict from preprocess_partitions.py (levels, rwse,
-centroid, area, l1_to_l0, ...). Single graph (batch_size=1) in M4.
+centroid, area, ...). Single graph: pass one dict. PyG batch (M5): pass a list
+of dicts (one per graph) and a batched `graph` carrying `ptr`.
 """
 
 from __future__ import annotations
@@ -24,7 +25,9 @@ import torch.nn as nn
 from torch import Tensor
 
 from .micro_gnn import MicroGNN
-from .macro_transformer import SegmentEncoder, MacroTransformer, dispatch
+from .macro_transformer import (
+    SegmentEncoder, MacroTransformer, dispatch, run_macro_batched,
+)
 from .physics_ops import compute_ns_quantities, denormalize_velocity
 from .amr_router import route, sample_thresholds, DEFAULT_RANGES
 
@@ -87,24 +90,67 @@ class AMRM4GN(nn.Module):
         cen_t = torch.where(fine, cen_L1[l1_of_tok], cen_L0[l0_of_tok])
         return rwse_t, cen_t
 
-    def forward(self, graph, cache: dict, thresholds: dict | None = None) -> Tensor:
+    def forward(self, graph, cache, thresholds: dict | None = None) -> Tensor:
+        """Single graph (cache = dict) or a PyG batch (cache = list of dicts,
+        one per graph; graph must carry `ptr`). Returns pred [N_total, 3].
+
+        micro runs on the whole batch at once; physical quantities use the
+        concatenated per-graph pos/area + batched edge_index (edges never cross
+        graphs); routing is done per graph and token ids are globally offset;
+        the macro transformer attends per graph (run_macro_batched). The
+        single-graph path is numerically identical to M4.
+        """
+        caches = cache if isinstance(cache, list) else [cache]
+        B = len(caches)
+        N = graph.x.shape[0]
+        device = graph.x.device
+
+        ptr = getattr(graph, "ptr", None)
+        if ptr is None:
+            if B != 1:
+                raise ValueError("batch of caches requires graph.ptr (PyG batch)")
+            ptr = torch.tensor([0, N], device=device)
+
         h_node = self.micro(graph.x, graph.edge_attr, graph)
 
         # physical velocity for the indicators (D1)
         u, v = graph.x[:, 0], graph.x[:, 1]
         if self.vel_mean is not None:
             u, v = denormalize_velocity(u, v, self.vel_mean, self.vel_std)
+        pos_g = caches[0]["pos"] if B == 1 else torch.cat([c["pos"] for c in caches], 0)
+        area_g = caches[0]["area"] if B == 1 else torch.cat([c["area"] for c in caches], 0)
         phys = compute_ns_quantities(
-            u=u, v=v, pos=cache["pos"], edge_index=graph.edge_index,
-            area=cache["area"],
+            u=u, v=v, pos=pos_g, edge_index=graph.edge_index, area=area_g,
         )
 
-        if thresholds is None:
-            thresholds = sample_thresholds(self.ranges, training=self.training)
-        kept_assign, depth, T, _ = route(cache["levels"], phys, thresholds)
+        # per-graph routing, then globally offset the token ids
+        kept_parts, depth_parts, rwse_parts, cen_parts, tb_parts = [], [], [], [], []
+        tok_off = 0
+        for b in range(B):
+            s, e = int(ptr[b]), int(ptr[b + 1])
+            phys_b = {k: val[s:e] for k, val in phys.items()}
+            thr_b = thresholds if thresholds is not None else \
+                sample_thresholds(self.ranges, training=self.training)
+            ka, dep, T, _ = route(caches[b]["levels"], phys_b, thr_b)
+            rw, ce = self._assemble_token_pe(caches[b], ka, dep, T)
+            kept_parts.append(ka + tok_off)
+            depth_parts.append(dep)
+            rwse_parts.append(rw)
+            cen_parts.append(ce)
+            tb_parts.append(torch.full((T,), b, dtype=torch.long, device=device))
+            tok_off += T
 
-        rwse_t, cen_t = self._assemble_token_pe(cache, kept_assign, depth, T)
-        h_seg = self.seg_enc(h_node, kept_assign, T, rwse_t, depth, cen_t)
-        h_seg = self.macro(h_seg)
+        kept_assign = torch.cat(kept_parts, 0)
+        depth = torch.cat(depth_parts, 0)
+        rwse_t = torch.cat(rwse_parts, 0)
+        cen_t = torch.cat(cen_parts, 0)
+        token_batch = torch.cat(tb_parts, 0)
+        T_total = tok_off
+
+        h_seg = self.seg_enc(h_node, kept_assign, T_total, rwse_t, depth, cen_t)
+        if B == 1:
+            h_seg = self.macro(h_seg)                       # identical to M4
+        else:
+            h_seg = run_macro_batched(self.macro, h_seg, token_batch, B)
         h_cat = dispatch(h_seg, kept_assign, h_node)
         return self.decoder(h_cat)
