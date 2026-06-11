@@ -75,7 +75,12 @@ class MacroTransformer(nn.Module):
             d_model=d, nhead=heads, dim_feedforward=ffn, dropout=dropout,
             activation="gelu", batch_first=True, norm_first=True,  # Pre-LN
         )
-        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=layers)
+        # Pre-LN (norm_first=True) makes nested-tensor fast-path unusable, so
+        # disable it explicitly to silence the "enable_nested_tensor is True but
+        # ... norm_first was True" warning. No functional change.
+        self.encoder = nn.TransformerEncoder(
+            enc_layer, num_layers=layers, enable_nested_tensor=False
+        )
 
     def forward(self, h_seg: Tensor, key_padding_mask: Tensor | None = None) -> Tensor:
         """h_seg [T, d] (single graph) or [B, T, d]. key_padding_mask [B, T]

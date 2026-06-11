@@ -2,8 +2,7 @@
 
 **更新日期**：2026年6月11日
 **当前阶段**：M4 — 端到端模型（micro GNN + 段编码 + Macro Transformer + dispatch + 统一 decoder）+ 数据管线 + overfit 单 case
-**M4 状态**：🚧 **进行中**。本轮先交付**纯模型组件**（`micro_gnn.py`、`macro_transformer.py`）+ 单测，并确认两个决策门 D4/D5。`model.py` / `data_amr.py` / `preprocess_partitions.py` / `train_amr_m4gn.py` / `conf` 下一轮。
-> ⚠️ 本轮代码**已实现、尚未由你实跑测试通过**。开发机无 torch，我未跑 pytest。下文凡「测试通过」均标「待你重跑确认」。
+**M4 状态**：🚧 **进行中**。本轮交付**纯模型组件**（`micro_gnn.py`、`macro_transformer.py`）+ 单测，并确认两个决策门 D4/D5。**单测 9/9 已实跑通过**。`model.py` / `data_amr.py` / `preprocess_partitions.py` / `train_amr_m4gn.py` / `conf` 下一轮。
 **前置**：M1/M2/M3 已关闭。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§4.3/4.8/4.9、§7.2、§7.4.4~7.4.6、§八 M4）
 
@@ -37,7 +36,7 @@ tests/
 
 **关键实现细节**：`MicroGNN.__init__` 先构造一个临时 `MeshGraphNet`，然后**只把 `edge_encoder/node_encoder/processor` 注册为自身子模块**（局部 backbone 变量随后丢弃），所以 `node_decoder` 既不存储也**不计入 `parameters()`**——这样 §7.4.6 的「每个参数都收到梯度」才成立（否则 decoder 参数永远无梯度）。
 
-> ⚠️ 这条「D4 通过」基于**源码核对**，但 `MicroGNN` 的 pytest（`test_micro_gnn.py`）**你还没跑**。待你实跑确认。
+> **D4 通过**基于源码核对 + `test_micro_gnn.py` **已实跑 4/4 通过**（含 `test_matches_meshgraphnet_processor` 验证 forward==MGN 的 encoder→processor）。
 
 ## 三、🚩 决策门 D5（数据管线，U1/§7.2-A）：选 P1
 
@@ -86,16 +85,16 @@ pytest tests/test_micro_gnn.py tests/test_macro_transformer.py -v
 
 | 验收点 | 合格判据 | 状态 |
 | --- | --- | --- |
-| micro_gnn 形状 | x[N,6]→h_node[N,hidden] | ⏳ 待实跑 |
-| micro_gnn 无 decoder 参数 | named_parameters 无 `node_decoder` | ⏳ 待实跑 |
-| micro_gnn 与 MGN 一致（D4）| forward==MGN 的 encoder→processor | ⏳ 待实跑 |
-| micro_gnn 全参有梯度 | 反向后每参数 grad 有限非 NaN | ⏳ 待实跑 |
-| SegmentEncoder 置换不变 | 打乱节点序输出不变 | ⏳ 待实跑 |
-| SegmentEncoder T=1 | 退化为全局平均 | ⏳ 待实跑 |
-| MacroTransformer padding mask | 被 mask token 不影响他 token | ⏳ 待实跑 |
-| dispatch | `h_cat[:, :d]==h_node` | ⏳ 待实跑 |
+| micro_gnn 形状 | x[N,6]→h_node[N,hidden] | ✅ 通过 |
+| micro_gnn 无 decoder 参数 | named_parameters 无 `node_decoder` | ✅ 通过 |
+| micro_gnn 与 MGN 一致（D4）| forward==MGN 的 encoder→processor | ✅ 通过 |
+| micro_gnn 全参有梯度 | 反向后每参数 grad 有限非 NaN | ✅ 通过 |
+| SegmentEncoder 置换不变 | 打乱节点序输出不变 | ✅ 通过 |
+| SegmentEncoder T=1 | 退化为全局平均 | ✅ 通过 |
+| MacroTransformer padding mask | 被 mask token 不影响他 token | ✅ 通过 |
+| dispatch | `h_cat[:, :d]==h_node` | ✅ 通过 |
 
-> 跑完把输出发我，我据实回填，再继续下一轮（model/data/train/overfit）。
+> **实跑结果：9 passed in 20.35s**（gnn 环境）。另修了一条本代码的告警：`TransformerEncoder` 在 Pre-LN 下 `enable_nested_tensor` 失效的 UserWarning，已显式置 `False` 消除（无功能影响）。其余告警（torch.jit deprecated、torch_geometric.distributed、physicsnemo 的 SyntaxWarning）来自第三方/框架，非本项目代码。
 
 ---
 
