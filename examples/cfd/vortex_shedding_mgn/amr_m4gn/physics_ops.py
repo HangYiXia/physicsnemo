@@ -85,6 +85,7 @@ def lstsq_gradient(field, pos, edge_index, eps=1e-8):
         ei = torch.as_tensor(np.asarray(edge_index), dtype=torch.long)
 
     N, C = field.shape
+    ei = ei.to(field.device)
     i_idx, j_idx = ei[0], ei[1]
 
     dx = pos[j_idx] - pos[i_idx]            # [E, 2]
@@ -94,13 +95,13 @@ def lstsq_gradient(field, pos, edge_index, eps=1e-8):
     outer_xx = dx[:, :, None] * dx[:, None, :]   # [E, 2, 2]
     outer_xf = dx[:, :, None] * df[:, None, :]   # [E, 2, C]
 
-    A = torch.zeros(N, 2, 2, dtype=field.dtype)
-    B = torch.zeros(N, 2, C, dtype=field.dtype)
+    A = torch.zeros(N, 2, 2, dtype=field.dtype, device=field.device)
+    B = torch.zeros(N, 2, C, dtype=field.dtype, device=field.device)
     A.index_add_(0, i_idx, outer_xx)
     B.index_add_(0, i_idx, outer_xf)
 
     # Regularize and solve A @ grad = B  (grad: [N, 2, C]).
-    A = A + eps * torch.eye(2, dtype=field.dtype)[None]
+    A = A + eps * torch.eye(2, dtype=field.dtype, device=field.device)[None]
     grad = torch.linalg.solve(A, B)         # [N, 2, C]
 
     return grad.transpose(1, 2).contiguous()  # [N, C, 2]

@@ -141,7 +141,7 @@ M4 目标（Design Doc §八 M4）：**完整模型在单个 case 上 overfit �
 - **应该得到什么**：
   - 终端先打印 `Preparing the train dataset...`，并在 cwd 生成 `edge_stats.json`/`node_stats.json`（train split 的副产物，正常现象）；
   - 然后每 10 epoch 打印一行 `epoch xxxx  NMSE x.xxxe±xx`，**NMSE 应随 epoch 大体单调下降、降到明显小于初值（理想 <1e-2 量级）**。降不下去/震荡/NaN 见 §六。
-- **状态**：⏳ **待你实跑**（上次因 test split 缺 json 失败，现已改用 train split）。
+- **状态**：⏳ **待你实跑**（已修两个报错：① test-split 缺 stats → 改用 train split；② GPU device 不一致 → `physics_ops` 张量跟随 `field.device`）。
 
 > 跑完把 ① `pytest tests/test_model.py` 输出 ② overfit 的 NMSE 那几行发我，我据实回填验收并最终确认 D1。
 
@@ -163,7 +163,7 @@ M4 目标（Design Doc §八 M4）：**完整模型在单个 case 上 overfit �
 | --- | --- | --- |
 | `FileNotFoundError: edge_stats.json`（或 node_stats）| `--split` | 非 train split 要读 baseline 生成的 stats json；用 `--split train`（自算 stats、默认值）即可，**已是默认** |
 | `ImportError`/`cannot import name` | 步骤 0 文件是否同步齐全 | `__init__.py` 没同步是历史高频坑 |
-| `RuntimeError: ... on different device` | `train_amr_m4gn.move_cache` | cache 张量与 graph 必须同 device，已用该函数搬运 |
+| `RuntimeError: ... on the same device` | 已修 | `physics_ops.lstsq_gradient` 的 `A/B/eye` 之前没带 device（M2 只在 CPU 测过），GPU 上与输入不同 device → 报错。已让其跟随 `field.device`，并把 `edge_index` 对齐到同 device。CPU 路径数值完全等价（M2 的 8/8 不受影响）|
 | overfit NMSE 不降/震荡 | `--omega_thresh`、`--lr` | 阈值让 routing 几乎全细/全粗时学习信号弱；先试 `--omega_thresh 30`、`--lr 1e-3` |
 | NMSE 数值异常大 | NMSE 分母 | target 速度增量量级小，已加 `eps=1e-8`；仍异常则打印 `graph.y` 量级 |
 | `loss` 变 NaN | 物理量/反归一化 | 查 `vel_mean/std` 是否正确加载、`compute_ns_quantities` 是否有除零 |
