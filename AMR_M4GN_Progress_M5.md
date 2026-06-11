@@ -6,7 +6,8 @@
 - 小步 1（批处理注意力隔离）：**单测 3/3 实跑通过**（含跨图不泄漏）。
 - 小步 2（model 批处理集成）：**单测 2/2 + 单图回归 3/3 实跑通过**（batch==逐图拼接）。
 - 小步 3（完整训练入口）：**多 case batch 训练实跑通过**——NMSE 3.06→~0.08（降约 35×），checkpoint 已存。
-- 小步 4（inference + 预测可视化）：**代码已实现，待你实跑**（用小步 3 的 checkpoint 出 pred vs GT 图）。
+- 小步 4（inference + 预测可视化）：**实跑通过**——预测场与真值场形态高度吻合（`09_prediction_case0_t25.png`），端到端「训练→推理→可视化」闭环打通。
+- 小步 4b（rollout + 误差曲线）：**代码已实现，待你实跑**（自回归多步 + 速度 RMSE-vs-step 曲线）。
 **前置**：M1/M2/M3 ✅、M4 🟢（端到端管线跑通，overfit NMSE 0.92→0.013）。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§7.2-C 批处理 / §八 M5）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
@@ -24,7 +25,8 @@
 | **1. 批处理注意力隔离** | `pack_segments`/`run_macro_batched`：变长 token 打包成 `[B,Tmax,d]`+mask，Transformer 注意力按图隔离 | ✅ 单测 3/3 通过 |
 | 2. model 批处理集成 | `model.forward` 支持 PyG batch：逐图 route → 全局偏移 token id + `token_batch` → 批处理 transformer | ✅ 单测 2/2 + 回归 3/3 |
 | 3. 完整训练入口 | 把 overfit 脚本扩成正经训练（多 case、checkpoint、lr 调度），复用 `train.py` 框架 | ✅ 实跑通过（NMSE 3.06→~0.08）|
-| 4. `inference_amr_m4gn.py` | 预测场可视化（pred vs GT + 误差）+ 指标；rollout 后续 | ✅ 实现，待实跑 |
+| 4. `inference_amr_m4gn.py` | 预测场可视化（pred vs GT + 误差）+ 指标；rollout 后续 | ✅ 实跑通过（预测≈真值）|
+| 4b. rollout + 误差曲线 | 自回归多步 rollout（边界 mask）+ 速度 RMSE-vs-step 曲线 | ✅ 实现，待实跑 |
 | 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ⬜ 待做 |
 
 ---
@@ -163,9 +165,7 @@ train_amr_m4gn_full.py   ✅ 新建：多 case + PyG batch + checkpoint + lr 调
 #### 步骤 2 — 跑多 case batch 训练（smoke run）
 - **做什么**：
   ```bash
-  python train_amr_m4gn_full.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow \
-      --cache_dir ./amr_cache --num_cases 4 --num_steps 50 --batch_size 2 \
-      --epochs 50 --omega_thresh 30
+  python train_amr_m4gn_full.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --num_cases 4 --num_steps 50 --batch_size 2 --epochs 50 --omega_thresh 30
   ```
 - **为什么**：验证「多个算例 + batch_size>1」这条真实训练链路能跑通、loss 在下降、能存 checkpoint——这是 M5 从「单 case overfit」迈向「正经训练」的关键一跳。
 - **应该得到什么**：
@@ -178,7 +178,7 @@ train_amr_m4gn_full.py   ✅ 新建：多 case + PyG batch + checkpoint + lr 调
 
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| 多 case 预处理 | `preprocess_partitions.py --split train --num_cases 4` | 生成 4 个 `partition_cache_train_*.pt` | ⏳ 待实跑 |
+| 多 case 预处理 | `preprocess_partitions.py --split train --num_cases 4` | 生成 4 个 `partition_cache_train_*.pt` | ✅ **已实跑：train 0~3 全部生成（K0=64,K1=256）** |
 | batch 训练跑通 | `train_amr_m4gn_full.py ... --batch_size 2` | 无报错、NMSE 总体下降、存 checkpoint | ✅ **实跑：NMSE 3.06→~0.08，checkpoint 已存** |
 
 > 小步 3 闭环。实测训练日志：epoch0 NMSE 3.06 → epoch49 ~0.08（中段最低 ~0.07），总体下降约 35×（多 case 比单 case overfit 难，后期在 7e-2~1e-1 震荡属正常）。进入小步 4（`inference_amr_m4gn.py`：预测场可视化）。
@@ -207,24 +207,67 @@ inference_amr_m4gn.py   ✅ 新建：加载 checkpoint → 单步预测 → 反�
 #### 步骤 1 — 用训练好的 checkpoint 出预测图
 - **做什么**（用小步 3 存的 checkpoint）：
   ```bash
-  python inference_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow \
-      --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch49.pt \
-      --case_idx 0 --timestep 25 --num_steps 50 --omega_thresh 30
+    python inference_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch49.pt --case_idx 0 --timestep 25 --num_steps 50 --omega_thresh 30
   ```
 - **为什么**：把训练结果**可视化验证**——这是你之前想看的「预测 vs 真值」图。
 - **应该得到什么**：
   - 终端打印 `per-channel NMSE (norm space)` 与 `per-channel RMSE (physical)`；
   - `./inference_vis/09_prediction_case0_t25.png`：3×3 面板，**预测列与真值列形态应接近**（尾迹/壁面结构对得上），误差列整体偏小、主要残留在涡街等剧烈变化处。
   - 注意：这是 4 case、50 epoch 的 smoke 模型（NMSE~0.08），预测会**大致像**但不会完美；要更准需更多 case/epoch。
+- **状态**：✅ **实跑通过**。
+
+### 验收
+
+| 验收点 | 命令 | 合格判据 | 状态 |
+| --- | --- | --- | --- |
+| 预测可视化 | `inference_amr_m4gn.py ...` | 出 `09_prediction_*.png`，预测列≈真值列；打印 NMSE/RMSE | ✅ 实跑通过 |
+
+**实测结果（case0, t=25）**：
+- per-channel NMSE（归一化空间）du/dv/p = **0.317 / 0.453 / 0.143**；
+- per-channel RMSE（物理）du/dv/p = **1.0e-3 / 5.9e-4 / 1.7e-2**；
+- `09_prediction_case0_t25.png`：**预测列与真值列形态高度吻合**——du/dv 的尾迹涡街红蓝结构、p 的圆柱前高压/后低压梯度都对得上；**误差集中在圆柱后方涡街/驻点等剧烈变化区**，大片来流误差≈0（物理上预期的难点分布）。
+- **诚实说明**：这是 4 case×50 epoch 的 **smoke 模型**，形态已对、量级合理；单帧 NMSE（尤其 dv，量级小→分母小→NMSE 偏高）高于训练 batch 平均（~0.08），属正常，**非最终性能**。结论：端到端「训练→推理→可视化」**闭环成立、预测场形态正确**。
+
+> 小步 4 闭环。M5 收尾还剩：小步 4b（多步 rollout + §6.4 全指标 + 与 MGN/X-MGN baseline 对比）、小步 5（D3 阈值标定）。
+
+---
+
+## 小步 4b — 自回归 rollout + 误差曲线（本轮）
+
+### 做了什么
+
+```
+inference_amr_m4gn.py   ✅ 改：加 --rollout K 模式 + run_rollout（多步自回归 + 速度 RMSE-vs-step 曲线）
+```
+
+### 为什么这么设计
+
+- **rollout 才是代理模型的真实用法**：单步预测是「给真值输入猜下一帧」；rollout 是「只给初始帧，之后用自己的预测一路往下推 K 步」，会暴露**误差累积/稳定性**——这是 §6.4 评估的核心。
+- **边界条件用 GT（baseline 同款）**：只对 `rollout_mask`（内部节点）施加预测增量，**边界节点（inflow/wall/outflow）速度保持真值**，否则边界乱掉会让整场迅速发散。`rollout_mask` 只在 **test split** 提供，故 rollout 用 `--split test`。
+- **物理空间积分**：每步把归一化预测增量反归一化为物理 `Δv`，`v_{t+1}=v_t+Δv`，再归一化喂下一步（与 `inference.py` 一致）。
+
+### 运行步骤（你拿到代码后）
+
+#### 步骤 0 — 同步文件 + 准备 test 缓存
+- `inference_amr_m4gn.py`（已更新）。
+- 确认有 test case0 的缓存（若没有先跑）：`python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test --num_cases 1 --out_dir ./amr_cache`
+
+#### 步骤 1 — 跑 rollout
+- **做什么**：`python inference_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch49.pt --split test --case_idx 0 --num_steps 60 --rollout 50 --omega_thresh 30`
+- **为什么**：验证 rollout 链路（自回归 + 边界 mask + 积分）能跑，并画出误差随步数的累积曲线。
+- **应该得到什么**：
+  - 终端打印 `rollout velocity RMSE per step (first/mid/last)`；
+  - `./inference_vis/10_rollout_rmse_case0.png`：RMSE-vs-step 曲线。
+  - **诚实预期**：当前是 **4 case×50 epoch 的 smoke 模型**，且 rollout 在**没训过的 test case** 上做泛化，**RMSE 大概率随步数明显上升甚至发散**——这正常，rollout 稳定需要充分训练 + 训练期加 noise（baseline 也靠这个）。本步先验证**机制正确**，稳定性是放大训练后的事。
 - **状态**：⏳ **待你实跑**。
 
 ### 验收
 
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| 预测可视化 | `inference_amr_m4gn.py ...` | 出 `09_prediction_*.png`，预测列≈真值列；打印 NMSE/RMSE | ⏳ 待实跑 |
+| rollout 跑通 | `inference_amr_m4gn.py ... --rollout 50` | 出 `10_rollout_rmse_case0.png` + 打印每步 RMSE，无报错 | ⏳ 待实跑 |
 
-> 跑完把图 + 指标发我。之后小步 4b（rollout + §6.4 指标 + baseline 对比）与小步 5（D3 阈值标定）收尾 M5。
+> 跑完把曲线 + RMSE 发我。注意：smoke 模型 rollout 发散是预期，重点是机制跑通。M5 收尾还剩小步 5（D3 阈值标定）+ 充分训练后的 baseline 对比。
 
 ---
 
@@ -234,5 +277,5 @@ inference_amr_m4gn.py   ✅ 新建：加载 checkpoint → 单步预测 → 反�
 | --- | --- |
 | §7.2-C 批内段偏移 + padding mask | 小步 1：`pack_segments`/`run_macro_batched`（本轮）；小步 2：`model` 集成 |
 | §7.6 完整训练/推理入口 | 小步 3 `train_amr_m4gn_full.py`（✅）、小步 4 `inference_amr_m4gn.py`（✅ 待实跑）|
-| §八 M5 退出标准（vs baseline 指标）| 小步 4b/5（rollout/指标/baseline 对比，待做）|
+| §八 M5 退出标准（vs baseline 指标）| 小步 4b（rollout/误差曲线，✅ 待实跑）+ 充分训练后 baseline 对比（待做）|
 | 决策门 D3 最终标定 | 小步 5（待做）|

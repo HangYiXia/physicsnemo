@@ -69,6 +69,51 @@ def plot_prediction(pos, cells, pred, true, save_path):
     print(f"  Saved: {save_path}")
 
 
+def run_rollout(model, ds, cache, case_idx, steps, thr, device, out_dir):
+    """Autoregressive rollout (baseline-style): only `rollout_mask` (interior)
+    nodes are updated by the predicted increment; boundary nodes keep GT. Each
+    step feeds the previous predicted velocity as the next input. Plots velocity
+    RMSE vs rollout step (error accumulation).
+    """
+    ns = {k: torch.as_tensor(v).to(device) for k, v in ds.node_stats.items()}
+    mask = ds.rollout_mask[case_idx].to(device).bool().view(-1, 1)  # [N,1], True=update
+    mask2 = mask.repeat(1, 2)
+    spc = ds.num_steps - 1
+    rmse_list = []
+    cur_vel_norm = None
+    for t in range(steps):
+        g = ds[case_idx * spc + t].to(device)
+        gt_vel_t = g.x[:, 0:2] * ns["velocity_std"] + ns["velocity_mean"]
+        exact_next = gt_vel_t + (g.y[:, 0:2] * ns["velocity_diff_std"] + ns["velocity_diff_mean"])
+        invar = g.x.clone()
+        if cur_vel_norm is not None:
+            invar[:, 0:2] = cur_vel_norm
+        g.x = invar
+        with torch.no_grad():
+            pred = model(g, cache, thresholds=thr)
+        diff = pred[:, 0:2] * ns["velocity_diff_std"] + ns["velocity_diff_mean"]
+        diff = torch.where(mask2, diff, torch.zeros_like(diff))
+        vt_phys = invar[:, 0:2] * ns["velocity_std"] + ns["velocity_mean"]
+        new_vel = vt_phys + diff
+        cur_vel_norm = (new_vel - ns["velocity_mean"]) / ns["velocity_std"]
+        m = mask.view(-1)
+        rmse = torch.sqrt(((new_vel[m] - exact_next[m]) ** 2).mean()).item()
+        rmse_list.append(rmse)
+
+    print("  rollout velocity RMSE per step (first/mid/last): "
+          f"{rmse_list[0]:.3e} / {rmse_list[len(rmse_list)//2]:.3e} / {rmse_list[-1]:.3e}")
+    plt.figure(figsize=(8, 4))
+    plt.plot(range(1, steps + 1), rmse_list, marker=".")
+    plt.xlabel("rollout step"); plt.ylabel("velocity RMSE (physical)")
+    plt.title(f"AMR-M4GN rollout error accumulation (case {case_idx})")
+    plt.grid(True, alpha=0.3)
+    save = os.path.join(out_dir, f"10_rollout_rmse_case{case_idx}.png")
+    plt.savefig(save, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {save}")
+    return rmse_list
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data_dir", type=str, required=True)
@@ -81,6 +126,9 @@ def main():
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--processor_size", type=int, default=15)
     p.add_argument("--omega_thresh", type=float, default=30.0)
+    p.add_argument("--rollout", type=int, default=0,
+                   help="if >0, autoregressive rollout this many steps; needs "
+                        "rollout_mask -> use --split test")
     p.add_argument("--out_dir", type=str, default="./inference_vis")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
@@ -106,10 +154,19 @@ def main():
     model.load_state_dict(ckpt["model"])
     model.eval()
 
-    idx = args.case_idx * (args.num_steps - 1) + args.timestep
-    graph = ds[idx].to(device)
     thr = {"G": float("inf"), "omega": args.omega_thresh,
            "M": float("inf"), "S": float("inf")}
+
+    if args.rollout > 0:
+        if not ds.rollout_mask:
+            raise ValueError("rollout needs rollout_mask; use --split test")
+        run_rollout(model, ds, cache, args.case_idx, args.rollout, thr,
+                    device, args.out_dir)
+        print("done.")
+        return
+
+    idx = args.case_idx * (args.num_steps - 1) + args.timestep
+    graph = ds[idx].to(device)
     with torch.no_grad():
         pred = model(graph, cache, thresholds=thr)   # [N,3] normalized space
     true = graph.y
