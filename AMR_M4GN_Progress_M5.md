@@ -5,7 +5,8 @@
 **M5 状态**：🚧 **进行中**。M5 较重、分小步推进，**每小步都配可单独验证的单测 + 文档**。
 - 小步 1（批处理注意力隔离）：**单测 3/3 实跑通过**（含跨图不泄漏）。
 - 小步 2（model 批处理集成）：**单测 2/2 + 单图回归 3/3 实跑通过**（batch==逐图拼接）。
-- 小步 3（完整训练入口）：**代码已实现，待你实跑**（需先 preprocess train split 的若干 case）。
+- 小步 3（完整训练入口）：**多 case batch 训练实跑通过**——NMSE 3.06→~0.08（降约 35×），checkpoint 已存。
+- 小步 4（inference + 预测可视化）：**代码已实现，待你实跑**（用小步 3 的 checkpoint 出 pred vs GT 图）。
 **前置**：M1/M2/M3 ✅、M4 🟢（端到端管线跑通，overfit NMSE 0.92→0.013）。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§7.2-C 批处理 / §八 M5）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
@@ -22,8 +23,8 @@
 | --- | --- | --- |
 | **1. 批处理注意力隔离** | `pack_segments`/`run_macro_batched`：变长 token 打包成 `[B,Tmax,d]`+mask，Transformer 注意力按图隔离 | ✅ 单测 3/3 通过 |
 | 2. model 批处理集成 | `model.forward` 支持 PyG batch：逐图 route → 全局偏移 token id + `token_batch` → 批处理 transformer | ✅ 单测 2/2 + 回归 3/3 |
-| 3. 完整训练入口 | 把 overfit 脚本扩成正经训练（多 case、checkpoint、lr 调度），复用 `train.py` 框架 | ✅ 实现，待实跑 |
-| 4. `inference_amr_m4gn.py` | rollout + §6.4 指标 + **预测场可视化**（你想看的图在这里）| ⬜ 待做 |
+| 3. 完整训练入口 | 把 overfit 脚本扩成正经训练（多 case、checkpoint、lr 调度），复用 `train.py` 框架 | ✅ 实跑通过（NMSE 3.06→~0.08）|
+| 4. `inference_amr_m4gn.py` | 预测场可视化（pred vs GT + 误差）+ 指标；rollout 后续 | ✅ 实现，待实跑 |
 | 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ⬜ 待做 |
 
 ---
@@ -154,8 +155,7 @@ train_amr_m4gn_full.py   ✅ 新建：多 case + PyG batch + checkpoint + lr 调
 #### 步骤 1 — 预处理若干 train case（生成缓存）
 - **做什么**：
   ```bash
-  python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow \
-      --split train --num_cases 4 --out_dir ./amr_cache
+  python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split train --num_cases 4 --out_dir ./amr_cache
   ```
 - **为什么**：完整训练按 `gidx` 读 `partition_cache_train_{gidx}.pt`；必须先离线生成（几何缓存，与时间步无关）。
 - **应该得到什么**：`./amr_cache/` 下出现 `partition_cache_train_0.pt`〜`_3.pt`，每个打印 `(K0=64, K1=256)`。
@@ -179,9 +179,52 @@ train_amr_m4gn_full.py   ✅ 新建：多 case + PyG batch + checkpoint + lr 调
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
 | 多 case 预处理 | `preprocess_partitions.py --split train --num_cases 4` | 生成 4 个 `partition_cache_train_*.pt` | ⏳ 待实跑 |
-| batch 训练跑通 | `train_amr_m4gn_full.py ... --batch_size 2` | 无报错、NMSE 总体下降、存 checkpoint | ⏳ 待实跑 |
+| batch 训练跑通 | `train_amr_m4gn_full.py ... --batch_size 2` | 无报错、NMSE 总体下降、存 checkpoint | ✅ **实跑：NMSE 3.06→~0.08，checkpoint 已存** |
 
-> 跑完把训练日志（NMSE 那几行）发我；通过后进入小步 4（`inference_amr_m4gn.py`：rollout + 指标 + 预测场可视化）。
+> 小步 3 闭环。实测训练日志：epoch0 NMSE 3.06 → epoch49 ~0.08（中段最低 ~0.07），总体下降约 35×（多 case 比单 case overfit 难，后期在 7e-2~1e-1 震荡属正常）。进入小步 4（`inference_amr_m4gn.py`：预测场可视化）。
+
+---
+
+## 小步 4 — `inference_amr_m4gn.py`：预测场可视化（本轮）
+
+### 做了什么
+
+```
+inference_amr_m4gn.py   ✅ 新建：加载 checkpoint → 单步预测 → 反归一化 → 出 pred vs GT vs |err| 9 宫格图 + 指标
+```
+
+### 为什么这么设计
+
+- **直接回答「能不能看到结果」**：M4 的 overfit 只给 loss 数字；这里把模型**预测的 (Δu, Δv, p) 场**反归一化回物理量，与**真值场**并排画在网格上（3 行 = du/dv/p，3 列 = 预测/真值/误差），一眼看出学得准不准。
+- **单步预测先行，rollout 后续**：先做「给定真值输入预测下一帧」的单步可视化（最直接），多步 rollout（用预测反馈做长序列）+ §6.4 全套指标 + baseline 对比留作小步 4 的后续/M5 收尾。
+- **指标双口径**：打印归一化空间 per-channel NMSE（与训练 loss 同尺度）+ 物理空间 RMSE（有量纲、可解释）。
+
+### 运行步骤（你拿到代码后）
+
+#### 步骤 0 — 同步文件
+`inference_amr_m4gn.py`。
+
+#### 步骤 1 — 用训练好的 checkpoint 出预测图
+- **做什么**（用小步 3 存的 checkpoint）：
+  ```bash
+  python inference_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow \
+      --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch49.pt \
+      --case_idx 0 --timestep 25 --num_steps 50 --omega_thresh 30
+  ```
+- **为什么**：把训练结果**可视化验证**——这是你之前想看的「预测 vs 真值」图。
+- **应该得到什么**：
+  - 终端打印 `per-channel NMSE (norm space)` 与 `per-channel RMSE (physical)`；
+  - `./inference_vis/09_prediction_case0_t25.png`：3×3 面板，**预测列与真值列形态应接近**（尾迹/壁面结构对得上），误差列整体偏小、主要残留在涡街等剧烈变化处。
+  - 注意：这是 4 case、50 epoch 的 smoke 模型（NMSE~0.08），预测会**大致像**但不会完美；要更准需更多 case/epoch。
+- **状态**：⏳ **待你实跑**。
+
+### 验收
+
+| 验收点 | 命令 | 合格判据 | 状态 |
+| --- | --- | --- | --- |
+| 预测可视化 | `inference_amr_m4gn.py ...` | 出 `09_prediction_*.png`，预测列≈真值列；打印 NMSE/RMSE | ⏳ 待实跑 |
+
+> 跑完把图 + 指标发我。之后小步 4b（rollout + §6.4 指标 + baseline 对比）与小步 5（D3 阈值标定）收尾 M5。
 
 ---
 
@@ -190,6 +233,6 @@ train_amr_m4gn_full.py   ✅ 新建：多 case + PyG batch + checkpoint + lr 调
 | Design Doc | M5 落地 |
 | --- | --- |
 | §7.2-C 批内段偏移 + padding mask | 小步 1：`pack_segments`/`run_macro_batched`（本轮）；小步 2：`model` 集成 |
-| §7.6 完整训练/推理入口 | 小步 3/4（待做）|
-| §八 M5 退出标准（vs baseline 指标）| 小步 3/4/5（待做）|
+| §7.6 完整训练/推理入口 | 小步 3 `train_amr_m4gn_full.py`（✅）、小步 4 `inference_amr_m4gn.py`（✅ 待实跑）|
+| §八 M5 退出标准（vs baseline 指标）| 小步 4b/5（rollout/指标/baseline 对比，待做）|
 | 决策门 D3 最终标定 | 小步 5（待做）|
