@@ -473,6 +473,15 @@ def main():
              "gate D3 / train-time sampling; this is only a visualization aid."
     )
     parser.add_argument(
+        "--route_channels", type=str, default="omega",
+        help="Comma-separated subset of {G,omega,M,S} used to decide 'active' "
+             "in the routing DEMO (default: omega only). Channels not listed "
+             "get an infinite threshold (never trigger). M is excluded by "
+             "default because momentum is high in the free-stream too and would "
+             "mark calm inflow as active. The router itself still supports all "
+             "four (Design Doc 4.7); this only controls the demo picture."
+    )
+    parser.add_argument(
         "--log_file", type=str, default=None,
         help="Path of the plain-text file to also save all console output to. "
              "Default: <output_dir>/run_log_case<idx>_t<timestep>.txt"
@@ -636,18 +645,23 @@ def main():
     if args.plot_routing:
         print(f"\n[6b] Running AMR token router (fold/keep)...")
         L1 = partition_levels[1]
-        # Demo thresholds: per-channel percentile of the L1 per-segment |phys|.
-        # (Real thresholds are decision gate D3 / train-time sampling.)
+        # Demo thresholds: per-channel percentile of the L1 per-segment |phys|,
+        # but only for the chosen channels (others -> inf, never active). M is
+        # excluded by default (high in free-stream). Real thresholds = D3.
+        channels = [c.strip() for c in args.route_channels.split(",") if c.strip()]
         agg = aggregate_per_segment(quantities, L1, K1_actual)
-        thresholds = {
-            k: float(torch.quantile(agg[k], args.route_pct / 100.0))
-            for k in ["G", "omega", "M", "S"]
-        }
+        thresholds = {}
+        for k in ["G", "omega", "M", "S"]:
+            if k in channels:
+                thresholds[k] = float(torch.quantile(agg[k], args.route_pct / 100.0))
+            else:
+                thresholds[k] = float("inf")
         kept_assign, kept_depth, T, _ = route(
             partition_levels, quantities, thresholds)
         n_fine = int((kept_depth == 1).sum())
         n_coarse = int((kept_depth == 0).sum())
         # Decision gate D3 statistics:
+        print(f"  Active channels (demo): {channels}  (excluded ones never trigger)")
         print(f"  Demo thresholds (p{args.route_pct:g} of per-seg |phys|): "
               + ", ".join(f"{k}={v:.3e}" for k, v in thresholds.items()))
         print(f"  Tokens T = {T}  (range [{K0_actual}, {K1_actual}])")
