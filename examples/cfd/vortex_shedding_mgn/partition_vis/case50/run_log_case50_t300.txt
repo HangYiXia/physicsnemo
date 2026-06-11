@@ -13,7 +13,7 @@ AMR-M4GN Preprocessing Visualization
   Saved: ./partition_vis\case50\02_velocity.png
 
 [3/6] Computing Laplacian eigenmodes (m=6)...
-  Eigenvalues: [1.7740585e-05 3.8735638e+00 1.5060107e+01 3.3447636e+01 5.5621044e+01
+  Eigenvalues: [1.7740398e-05 3.8735638e+00 1.5060107e+01 3.3447636e+01 5.5621044e+01
  6.0148849e+01]
   Saved: ./partition_vis\case50\03_eigenmodes.png
 
@@ -37,6 +37,15 @@ AMR-M4GN Preprocessing Visualization
 [6/6] Plotting partitions...
   Saved: ./partition_vis\case50\05_partition_L0.png
   Saved: ./partition_vis\case50\06_partition_L1.png
+
+[6b] Running AMR token router (fold/keep)...
+  Active channels (demo): ['omega']  (excluded ones never trigger)
+  Demo thresholds (p70 of per-seg |phys|): G=inf, omega=3.045e+01, M=inf, S=inf
+  Tokens T = 135  (range [64, 256])
+    kept fine (L1, active) : 77
+    folded coarse (L0)     : 58
+    reduction vs all-fine  : 47.3%
+  Saved: ./partition_vis\case50\08_routing.png
 
   Cached partition data to: ./partition_vis\case50\partition_cache.pt
 
