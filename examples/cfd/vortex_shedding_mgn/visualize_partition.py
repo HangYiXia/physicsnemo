@@ -44,6 +44,7 @@ from amr_m4gn.segmentation import (
     hybrid_segmentation,
 )
 from amr_m4gn.physics_ops import compute_ns_quantities
+from amr_m4gn.amr_router import aggregate_per_segment, route
 
 
 class _Tee:
@@ -287,6 +288,37 @@ def plot_physics_fields(pos, cells, quantities, save_path):
     print(f"  Saved: {save_path}")
 
 
+def plot_routing(pos, cells, kept_depth_per_node, kept_assign, T, save_path):
+    """Visualize the AMR fold/keep decision (M3).
+
+    Left  : nodes colored by depth (red = kept fine L1 token, blue = folded
+            back into a coarse L0 token).
+    Right : nodes colored by final token id (shows the variable-size tokens).
+    """
+    triang = tri.Triangulation(pos[:, 0], pos[:, 1], cells)
+    fig, axes = plt.subplots(2, 1, figsize=(14, 9))
+
+    tc0 = axes[0].tripcolor(triang, kept_depth_per_node.astype(float),
+                            cmap="coolwarm", shading="gouraud", vmin=0, vmax=1)
+    axes[0].set_aspect("equal")
+    axes[0].set_title(f"AMR routing: kept fine (red) vs folded coarse (blue) — T={T}")
+    axes[0].set_xlabel("x"); axes[0].set_ylabel("y")
+    fig.colorbar(tc0, ax=axes[0], fraction=0.046, pad=0.04, ticks=[0, 1])
+
+    tc1 = axes[1].tripcolor(triang, kept_assign.astype(float),
+                            cmap="tab20", shading="flat")
+    axes[1].set_aspect("equal")
+    axes[1].set_title(f"Final token id per node ({T} tokens)")
+    axes[1].set_xlabel("x"); axes[1].set_ylabel("y")
+    fig.colorbar(tc1, ax=axes[1], fraction=0.046, pad=0.04)
+
+    fig.suptitle("AMR Token Router (M3)", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {save_path}")
+
+
 def plot_partition(pos, cells, assign, level_name, num_segments, save_path,
                    seg_adjacency=None):
     """Plot mesh colored by segment assignment."""
@@ -428,6 +460,19 @@ def main():
              "(M2). Uses PHYSICAL velocity from TFRecord (no denormalization)."
     )
     parser.add_argument(
+        "--plot_routing", action="store_true", default=False,
+        help="Also run the M3 AMR router (fold/keep) and plot the result "
+             "(08_routing.png) + print the token-count T (decision gate D3). "
+             "Implies physical-quantity computation."
+    )
+    parser.add_argument(
+        "--route_pct", type=float, default=70.0,
+        help="Demo threshold for routing: per-channel percentile of the L1 "
+             "per-segment aggregated |phys|; segments above it are 'active' "
+             "and kept fine (default 70). NOTE: real thresholds = decision "
+             "gate D3 / train-time sampling; this is only a visualization aid."
+    )
+    parser.add_argument(
         "--log_file", type=str, default=None,
         help="Path of the plain-text file to also save all console output to. "
              "Default: <output_dir>/run_log_case<idx>_t<timestep>.txt"
@@ -535,7 +580,8 @@ def main():
                            os.path.join(args.output_dir, "04_obstacle_dist.png"))
 
     # ---- AMR physical indicators (M2, optional) ----
-    if args.plot_physics:
+    quantities = None
+    if args.plot_physics or args.plot_routing:
         print(f"\n[4b] Computing AMR physical indicators (G/omega/M/S)...")
         # velocity from load_single_case is PHYSICAL (raw TFRecord) -> no denorm.
         area = compute_node_area(pos, cells, num_nodes)
@@ -548,9 +594,10 @@ def main():
             arr = quantities[k].numpy()
             print(f"  {k:5s}: min={arr.min():.3e}, max={arr.max():.3e}, "
                   f"|.|p99={np.percentile(np.abs(arr), 99):.3e}")
-        plot_physics_fields(
-            pos, cells, {k: v.numpy() for k, v in quantities.items()},
-            os.path.join(args.output_dir, "07_physics_fields.png"))
+        if args.plot_physics:
+            plot_physics_fields(
+                pos, cells, {k: v.numpy() for k, v in quantities.items()},
+                os.path.join(args.output_dir, "07_physics_fields.png"))
 
     # ---- Build partition tree ----
     print(f"\n[5/6] Building partition tree (K0={args.K0}, K1={args.K1}, tau={args.tau})...")
@@ -585,6 +632,33 @@ def main():
                    os.path.join(args.output_dir, "06_partition_L1.png"),
                    seg_adjacency=None)  # Too many edges to draw for L1
     
+    # ---- AMR token routing (M3, optional) ----
+    if args.plot_routing:
+        print(f"\n[6b] Running AMR token router (fold/keep)...")
+        L1 = partition_levels[1]
+        # Demo thresholds: per-channel percentile of the L1 per-segment |phys|.
+        # (Real thresholds are decision gate D3 / train-time sampling.)
+        agg = aggregate_per_segment(quantities, L1, K1_actual)
+        thresholds = {
+            k: float(torch.quantile(agg[k], args.route_pct / 100.0))
+            for k in ["G", "omega", "M", "S"]
+        }
+        kept_assign, kept_depth, T, _ = route(
+            partition_levels, quantities, thresholds)
+        n_fine = int((kept_depth == 1).sum())
+        n_coarse = int((kept_depth == 0).sum())
+        # Decision gate D3 statistics:
+        print(f"  Demo thresholds (p{args.route_pct:g} of per-seg |phys|): "
+              + ", ".join(f"{k}={v:.3e}" for k, v in thresholds.items()))
+        print(f"  Tokens T = {T}  (range [{K0_actual}, {K1_actual}])")
+        print(f"    kept fine (L1, active) : {n_fine}")
+        print(f"    folded coarse (L0)     : {n_coarse}")
+        print(f"    reduction vs all-fine  : "
+              f"{100.0 * (K1_actual - T) / K1_actual:.1f}%")
+        plot_routing(pos, cells, kept_depth.numpy()[kept_assign.numpy()],
+                     kept_assign.numpy(), T,
+                     os.path.join(args.output_dir, "08_routing.png"))
+
     # ---- Save partition data for later use ----
     cache_path = os.path.join(args.output_dir, "partition_cache.pt")
     torch.save({

@@ -501,9 +501,9 @@ physicsnemo/examples/cfd/vortex_shedding_mgn/
 | --- | --- | --- | --- | --- |
 | `amr_m4gn/modal_decomp.py` | ✅ | edge_index, pos, node_type, cells, m=6 | f_md [N,6], eigvals | scipy.eigsh |
 | `amr_m4gn/segmentation.py` | ✅ | edge_index, pos, f_md, f_obs, K=[64,256], τ | levels=[L0,L1], seg_adj | pymetis/谱聚类 |
-| `amr_m4gn/pe.py` | ⬜ 新建 | seg_adj, steps=16 | rwse[K,16]（每层）| torch.sparse |
-| `amr_m4gn/physics_ops.py` | ⬜ 新建 | u,v,pos,edge_index,(u_prev) | {G,ω,M,S}[N] | torch_scatter |
-| `amr_m4gn/amr_router.py` | ⬜ 新建 | levels, phys, thresholds | kept_assign[N], depth[N], T | torch_scatter |
+| `amr_m4gn/pe.py` | ✅ 实现（单测待跑）| seg_adj, steps=16 | rwse[K,16]（每层）| torch（稠密）|
+| `amr_m4gn/physics_ops.py` | ✅ 实现（M2 pytest 8/8）| u,v,pos,edge_index,(u_prev) | {G,ω,M,S}[N] | torch（index_add_）|
+| `amr_m4gn/amr_router.py` | ✅ 实现（单测待跑）| levels, phys, thresholds | kept_assign[N], depth[N], T | torch（scatter_reduce_）|
 | `amr_m4gn/micro_gnn.py` | ⬜ 新建 | x, edge_attr, graph | h_node [N,d] | MeshGraphNet |
 | `amr_m4gn/macro_transformer.py` | ⬜ 新建 | h_node, kept_assign, rwse, batch | h_cat [N,2d] | nn.Transformer |
 | `amr_m4gn/model.py` | ⬜ 新建 | PyG Data + 预处理缓存 | pred [N,3] | 上述全部 |
