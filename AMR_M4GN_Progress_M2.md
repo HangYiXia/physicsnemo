@@ -7,8 +7,8 @@
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§4.6 / §7.4.2 / §八 M2）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
 
-> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · **M2 ✅** · M3 ✅ · M4 ✅ · M5 🟢（AMR>MGN，仅"更大训练集"待算力）· M6 🟡（八组消融就绪，实跑待算力）· M7 ⬜
-> **文档索引**：总览 `README_AMR_M4GN.md` · 设计 `AMR_M4GN_Design_Doc.md` · 阶段 M2（本文）+ M1/M3〜M6 各 `AMR_M4GN_Progress_M*.md`
+> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · **M2 ✅** · M3 ✅ · M4 ✅ · M5 🟢（AMR>MGN，仅"更大训练集"待算力）· M6 🟡（八组消融就绪，实跑待算力）· M7 🟡（EAGLE reader 就绪，真实数据待验证）
+> **文档索引**：总览 `README_AMR_M4GN.md` · 设计 `AMR_M4GN_Design_Doc.md` · 阶段 M2（本文）+ M1/M3〜M7 各 `AMR_M4GN_Progress_M*.md`
 
 > 本文只讲 M2 新增的东西：做了什么、为什么、怎么跑怎么验、决策门 D1 怎么暂定、实测发现的「t=0 无尾迹」与「S 由 KH 剪切改为应变率幅值」两件事的处置、M2 能否判定完成、M3 注意事项。M1 已覆盖的（装环境、下数据集）只引用不重写。
 

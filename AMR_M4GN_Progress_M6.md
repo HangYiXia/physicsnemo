@@ -4,9 +4,9 @@
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
 **配套文档**：设计 `AMR_M4GN_Design_Doc.md`（§6.5 消融计划 / §八 M6）；阶段 `AMR_M4GN_Progress_M1.md`〜`_M5.md`
 
-> **里程碑总进度**：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 · **M6 🟡（八组消融代码+脚本+单测就绪，实跑待算力）** · M7 ⬜
+> **里程碑总进度**：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 · **M6 🟡（八组消融代码+脚本+单测就绪，实跑待算力）** · M7 🟡（EAGLE reader 就绪，真实数据待验证）
 >
-> **文档索引**：总览 `README_AMR_M4GN.md` · 设计 `AMR_M4GN_Design_Doc.md` · 阶段 M6（本文）+ M1〜M5 各 `AMR_M4GN_Progress_M*.md`
+> **文档索引**：总览 `README_AMR_M4GN.md` · 设计 `AMR_M4GN_Design_Doc.md` · 阶段 M6（本文）+ M1〜M5/M7 各 `AMR_M4GN_Progress_M*.md`
 >
 > **状态图例**：✅ 完成并实跑验证 · 🟢 主体完成（仅更大规模待算力）· 🟡 **代码就绪、等待目标机实跑/测试** · ⬜ 未开始
 

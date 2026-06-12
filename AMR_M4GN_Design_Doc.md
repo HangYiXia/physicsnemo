@@ -8,8 +8,8 @@
 **主线 Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
 **对比 Baseline**：MGN、X-MeshGraphNet (X-MGN)、M4GN、节点级 Graph-Transformer
 
-> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 小验证档通过（AMR>MGN，仅"更大训练集"待算力）· **M6 🟡 八组消融代码+脚本+单测就绪，实跑待算力** · M7 ⬜
-> **文档索引**：上手总览 `README_AMR_M4GN.md`（先读这个）；本设计文档 `AMR_M4GN_Design_Doc.md`；阶段手册 `AMR_M4GN_Progress_M1.md`〜`_M6.md`（各含「拿到代码后每步做什么/为什么/应得什么」的操作说明）。
+> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 小验证档通过（AMR>MGN，仅"更大训练集"待算力）· M6 🟡 八组消融代码就绪 · **M7 🟡 EAGLE reader+并行预处理就绪，真实数据待验证**
+> **文档索引**：上手总览 `README_AMR_M4GN.md`（先读这个）；本设计文档 `AMR_M4GN_Design_Doc.md`；阶段手册 `AMR_M4GN_Progress_M1.md`〜`_M7.md`（各含「拿到代码后每步做什么/为什么/应得什么」的操作说明）。
 
 > **一句话定位**：在非结构三角网格上，用「局部 GNN（短程、高频物理）+ 段级 Transformer（全局、长程压力耦合）+ 物理驱动的自适应 Token 化（AMR）」三者融合的混合架构，在几乎不增加计算量的前提下解决 MeshGraphNet 的长程依赖丢失与过平滑问题，并为大规模湍流（EAGLE）提供可扩展路径。
 
@@ -748,10 +748,11 @@ class AMRM4GN(nn.Module):
 ### M7 — EAGLE 大规模扩展（可选，5 天）
 
 - **目标**：大规模湍流能力验证。
-- **新增**：EAGLE 数据 reader（区别于 TFRecord）；预处理并行化（U6）。
+- **新增**：EAGLE 数据 reader `eagle_dataset.py`（`load_eagle_case` + `EagleDatasetAMR`，复用基类静态方法、图格式一致）；预处理并行化 `--workers`（U6）+ `--source eagle`；`make_amr_dataset` 工厂 + 训练/推理/评估 `--dataset` 开关。
 - **配合数据**：EAGLE 子集（先少量场景验证管线，再扩量）。
 - **退出标准**：在 EAGLE 上跑通并与 MGN/X-MGN 对比；展示 AMR token 节省与长程优势。
 - **🚩 决策门 D9（扩展性瓶颈）**：若单图过大致显存不足 → 评估是否引入 X-MGN 式 Halo 分块（§十一-2，与本架构正交）。
+- **状态 🟡（代码就绪，真实数据待验证）**：reader/并行/切换/合成数据单测全部完成；按 EAGLE **公开格式**实现，已用**合成 npz** 验证形状/图格式管线，但**未在真实 EAGLE 上跑过**（字段名/节点类型 id/动态网格/显存待核对）。动态网格按「sim 内 t=0 连通性固定」处理（假设 A1）。详见 `AMR_M4GN_Progress_M7.md`。
 
 **主线总工期**：约 20 工作日（M1–M6，4 周）；含 EAGLE 扩展约 5 周。
 

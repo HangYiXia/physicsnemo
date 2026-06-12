@@ -127,6 +127,7 @@ vortex_shedding_mgn/
 ├── eval_rollout.py              # 多 test case 平均评估
 ├── calibrate_thresholds.py      # AMR 路由阈值标定
 ├── run_ablation.py              # M6 模块消融编排
+├── eagle_dataset.py             # M7 EAGLE 数据 reader（同图格式，--dataset eagle）
 ├── visualize_partition.py       # 预处理诊断可视化
 ├── tests/                       # 单元测试（pytest tests/ -v）
 ├── train.py / inference.py      # [原版 NVIDIA MGN，未改动]
@@ -147,14 +148,14 @@ vortex_shedding_mgn/
 | M4 | 端到端管线 + overfit 自检 | ✅ |
 | M5 | 批处理 + 全量训练 + baseline 对比 | 🟢 小验证档通过，仅"更大训练集"待算力 |
 | M6 | 八组模块消融 | 🟡 代码/脚本/单测就绪，实跑待算力 |
-| M7 | EAGLE 大规模扩展（可选）| ⬜ |
+| M7 | EAGLE 大规模扩展（可选）| 🟡 reader+并行预处理就绪（按官方格式），真实数据待验证 |
 
 文档：
 > 设计文档与阶段手册位于**仓库根目录** `E:\phys\physicsnemo\`（与代码目录分开），本 README 在示例目录内。
 
 - **设计文档** `AMR_M4GN_Design_Doc.md`：动机、架构、决策门、消融计划。
-- **阶段手册** `AMR_M4GN_Progress_M1.md`〜`_M6.md`：每阶段「做什么 / 为什么 / 应得什么」+ 命令 + 结果。
-  - 想直接跑全套命令 → 看 **M5 §2**；想了解消融 → 看 **M6**。
+- **阶段手册** `AMR_M4GN_Progress_M1.md`〜`_M7.md`：每阶段「做什么 / 为什么 / 应得什么」+ 命令 + 结果。
+  - 想直接跑全套命令 → 看 **M5 §2**；想了解消融 → 看 **M6**；想跑 EAGLE → 看 **M7**。
 
 ---
 

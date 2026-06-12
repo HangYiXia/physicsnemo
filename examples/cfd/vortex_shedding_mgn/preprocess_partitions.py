@@ -29,7 +29,16 @@ from amr_m4gn.modal_decomp import laplacian_eigenmodes, compute_node_area
 from amr_m4gn.segmentation import build_partition_tree, compute_obstacle_distance
 from amr_m4gn.pe import rwse_segment, rwse_node
 from amr_m4gn.amr_router import build_l1_to_l0
-from visualize_partition import load_single_case
+
+
+def _get_loader(source: str):
+    """Return the single-case loader for the chosen dataset source. Both return
+    the same dict {mesh_pos, cells, edge_index, node_type, num_nodes}."""
+    if source == "eagle":
+        from eagle_dataset import load_eagle_case
+        return load_eagle_case
+    from visualize_partition import load_single_case
+    return load_single_case
 
 
 def _segment_centroids(pos_t: torch.Tensor, assign: torch.Tensor, K: int) -> torch.Tensor:
@@ -44,13 +53,17 @@ def _segment_centroids(pos_t: torch.Tensor, assign: torch.Tensor, K: int) -> tor
 
 def build_cache(data_dir, split, case_idx, K0, K1, num_modes, tau,
                 use_cotangent=True, boundary_type="neumann", steps=16,
-                use_modal=True):
+                use_modal=True, source="tfrecord"):
     """Build the geometry/partition cache dict for one case.
+
+    source="tfrecord" (cylinder-flow) or "eagle" (EAGLE) selects the single-case
+    loader; both yield the same dict, so the rest is identical.
 
     use_modal=False (M6 ablation "w/o Modal Decomp"): zero the modal features so
     the SLIC refinement is guided by geometry (obstacle distance + position)
     only, i.e. a METIS+geometry partition without Laplacian-eigenmode guidance.
     """
+    load_single_case = _get_loader(source)
     data = load_single_case(data_dir, split, case_idx, timestep=0)
     pos = data["mesh_pos"]             # np [N,2]
     cells = data["cells"]              # np [C,3]
@@ -111,9 +124,24 @@ def build_cache(data_dir, split, case_idx, K0, K1, num_modes, tau,
     return cache
 
 
+def _build_one(args_tuple):
+    """Worker: build + save one case cache (module-level so it is picklable for
+    multiprocessing on Windows/macOS)."""
+    (c, data_dir, split, K0, K1, num_modes, tau, steps, use_modal, source,
+     out_dir, suffix) = args_tuple
+    cache = build_cache(data_dir, split, c, K0, K1, num_modes, tau,
+                        steps=steps, use_modal=use_modal, source=source)
+    path = os.path.join(out_dir, f"partition_cache_{split}_{c}{suffix}.pt")
+    torch.save(cache, path)
+    return c, path, cache["meta"]["K0"], cache["meta"]["K1"]
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data_dir", type=str, required=True)
+    p.add_argument("--source", type=str, default="tfrecord",
+                   choices=["tfrecord", "eagle"],
+                   help="dataset source: tfrecord (cylinder-flow) or eagle")
     p.add_argument("--split", type=str, default="test")
     p.add_argument("--num_cases", type=int, default=1)
     p.add_argument("--case_start", type=int, default=0)
@@ -123,6 +151,8 @@ def main():
     p.add_argument("--tau", type=float, default=1.0)
     p.add_argument("--steps", type=int, default=16)
     p.add_argument("--out_dir", type=str, default="./amr_cache")
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel processes for preprocessing (U6); 1 = serial")
     p.add_argument("--no_modal", action="store_true", default=False,
                    help="M6 ablation: build the partition WITHOUT modal-decomp "
                         "guidance (geometry-only SLIC); writes a *_nomodal.pt "
@@ -131,15 +161,23 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     suffix = "_nomodal" if args.no_modal else ""
-    for c in range(args.case_start, args.case_start + args.num_cases):
-        print(f"[preprocess] case {c} ({args.split}{suffix}) ...")
-        cache = build_cache(args.data_dir, args.split, c,
-                            args.K0, args.K1, args.num_modes, args.tau,
-                            steps=args.steps, use_modal=not args.no_modal)
-        path = os.path.join(
-            args.out_dir, f"partition_cache_{args.split}_{c}{suffix}.pt")
-        torch.save(cache, path)
-        print(f"  saved {path}  (K0={cache['meta']['K0']}, K1={cache['meta']['K1']})")
+    cases = list(range(args.case_start, args.case_start + args.num_cases))
+    jobs = [(c, args.data_dir, args.split, args.K0, args.K1, args.num_modes,
+             args.tau, args.steps, not args.no_modal, args.source,
+             args.out_dir, suffix) for c in cases]
+
+    if args.workers > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        print(f"[preprocess] {len(jobs)} cases ({args.source}{suffix}) "
+              f"on {args.workers} workers ...")
+        with ProcessPoolExecutor(max_workers=args.workers) as ex:
+            for c, path, K0a, K1a in ex.map(_build_one, jobs):
+                print(f"  saved {path}  (K0={K0a}, K1={K1a})")
+    else:
+        for job in jobs:
+            print(f"[preprocess] case {job[0]} ({args.split}{suffix}) ...")
+            c, path, K0a, K1a = _build_one(job)
+            print(f"  saved {path}  (K0={K0a}, K1={K1a})")
     print("done.")
 
 

@@ -63,3 +63,17 @@ class VortexSheddingDatasetAMR(VortexSheddingDataset):
         prev_t = tidx - 1 if tidx > 0 else 0
         graph.x_prev = self.node_features[gidx]["velocity"][prev_t].float()
         return graph
+
+
+def make_amr_dataset(dataset: str = "vortex", **kwargs):
+    """Factory selecting the AMR dataset by source (M7).
+
+    dataset="vortex" -> VortexSheddingDatasetAMR (cylinder-flow TFRecord)
+    dataset="eagle"  -> EagleDatasetAMR (EAGLE .npz)
+    Both expose the same surface (node_stats/cells/rollout_mask/get_cache and
+    __getitem__ -> graph(+pos,+gidx,+x_prev)), so callers only switch the source.
+    """
+    if dataset == "eagle":
+        from eagle_dataset import EagleDatasetAMR
+        return EagleDatasetAMR(**kwargs)
+    return VortexSheddingDatasetAMR(**kwargs)

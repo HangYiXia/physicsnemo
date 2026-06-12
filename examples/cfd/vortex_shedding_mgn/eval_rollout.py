@@ -35,7 +35,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from physicsnemo.models.meshgraphnet import MeshGraphNet
-from data_amr import VortexSheddingDatasetAMR
+from data_amr import make_amr_dataset
 from amr_m4gn.model import AMRM4GN
 from train_amr_m4gn import move_cache
 from compare_baselines import rollout_eval
@@ -44,6 +44,8 @@ from compare_baselines import rollout_eval
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data_dir", type=str, required=True)
+    p.add_argument("--dataset", type=str, default="vortex",
+                   choices=["vortex", "eagle"], help="data source (M7)")
     p.add_argument("--cache_dir", type=str, required=True)
     p.add_argument("--amr_ckpt", type=str, required=True)
     p.add_argument("--mgn_ckpt", type=str, default=None,
@@ -63,8 +65,8 @@ def main():
     device = torch.device(args.device)
     os.makedirs(args.out_dir, exist_ok=True)
 
-    ds = VortexSheddingDatasetAMR(
-        name="amr_eval", data_dir=args.data_dir, split=args.split,
+    ds = make_amr_dataset(
+        args.dataset, name="amr_eval", data_dir=args.data_dir, split=args.split,
         num_samples=args.num_cases, num_steps=args.num_steps,
         noise_std=0.0, cache_dir=args.cache_dir)
     if not ds.rollout_mask:

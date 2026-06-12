@@ -29,7 +29,7 @@ import argparse
 import torch
 from torch_geometric.loader import DataLoader as PyGDataLoader
 
-from data_amr import VortexSheddingDatasetAMR
+from data_amr import VortexSheddingDatasetAMR, make_amr_dataset
 from amr_m4gn.model import AMRM4GN
 from train_amr_m4gn import per_channel_nmse, move_cache
 
@@ -37,6 +37,9 @@ from train_amr_m4gn import per_channel_nmse, move_cache
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data_dir", type=str, required=True)
+    p.add_argument("--dataset", type=str, default="vortex",
+                   choices=["vortex", "eagle"],
+                   help="data source: vortex (cylinder-flow) or eagle (M7)")
     p.add_argument("--cache_dir", type=str, required=True,
                    help="dir with partition_cache_train_{gidx}.pt (preprocess first)")
     p.add_argument("--split", type=str, default="train")
@@ -76,8 +79,8 @@ def main():
     device = torch.device(args.device)
     os.makedirs(args.ckpt_dir, exist_ok=True)
 
-    ds = VortexSheddingDatasetAMR(
-        name="amr_train", data_dir=args.data_dir, split=args.split,
+    ds = make_amr_dataset(
+        args.dataset, name="amr_train", data_dir=args.data_dir, split=args.split,
         num_samples=args.num_cases, num_steps=args.num_steps,
         noise_std=args.noise_std, cache_dir=args.cache_dir,
     )

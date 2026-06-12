@@ -189,3 +189,4 @@ examples/cfd/vortex_shedding_mgn/raw_dataset/
 checkpoints_amr/
 checkpoints_mgn/
 amr_cache/
+animations/

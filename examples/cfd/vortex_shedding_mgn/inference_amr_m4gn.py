@@ -41,7 +41,7 @@ import matplotlib.tri as tri
 from matplotlib import animation
 from matplotlib.patches import Rectangle
 
-from data_amr import VortexSheddingDatasetAMR
+from data_amr import VortexSheddingDatasetAMR, make_amr_dataset
 from amr_m4gn.model import AMRM4GN
 from train_amr_m4gn import move_cache
 
@@ -185,6 +185,8 @@ def make_gif(pos, cells, preds, exacts, var_idx, var_name, save_path, frame_skip
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data_dir", type=str, required=True)
+    p.add_argument("--dataset", type=str, default="vortex",
+                   choices=["vortex", "eagle"], help="data source (M7)")
     p.add_argument("--cache_dir", type=str, required=True)
     p.add_argument("--ckpt", type=str, required=True)
     p.add_argument("--split", type=str, default="train")
@@ -215,8 +217,8 @@ def main():
     device = torch.device(args.device)
     os.makedirs(args.out_dir, exist_ok=True)
 
-    ds = VortexSheddingDatasetAMR(
-        name="amr_infer", data_dir=args.data_dir, split=args.split,
+    ds = make_amr_dataset(
+        args.dataset, name="amr_infer", data_dir=args.data_dir, split=args.split,
         num_samples=args.case_idx + 1, num_steps=args.num_steps,
         noise_std=0.0, cache_dir=args.cache_dir,
     )
