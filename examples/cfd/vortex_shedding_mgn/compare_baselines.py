@@ -7,12 +7,17 @@ updated by the prediction, boundary nodes kept at GT — identical to
 inference.py / inference_amr_m4gn.py), and reports:
     - velocity RMSE vs rollout step (two curves) -> 12_compare_rollout.png
     - step-1 RMSE and parameter counts
+    - (with --gif) a 3-row field animation AMR / MGN / Ground-Truth per field
+      -> animations/compare_case{idx}_{field}.gif
 
 Fair comparison: both models were trained with the same budget
 (train_amr_m4gn_full.py / train_mgn_baseline.py, same cases/epochs/noise/NMSE).
 
 Usage:
+    # RMSE curve only
     python compare_baselines.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --amr_ckpt ./checkpoints_amr/amr_m4gn_epoch199.pt --mgn_ckpt ./checkpoints_mgn/mgn_epoch199.pt --split test --case_idx 0 --num_steps 90 --rollout 80 --omega_thresh 8.9
+    # + 3-row AMR/MGN/GT field GIFs (u, v, p)
+    python compare_baselines.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --amr_ckpt ./checkpoints_amr/amr_m4gn_epoch199.pt --mgn_ckpt ./checkpoints_mgn/mgn_epoch199.pt --split test --case_idx 0 --num_steps 90 --rollout 80 --omega_thresh 8.9 --gif --gif_fields u v p
 """
 
 from __future__ import annotations
@@ -26,6 +31,9 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import animation
+from matplotlib import tri as mtri
+from matplotlib.patches import Rectangle
 
 from physicsnemo.models.meshgraphnet import MeshGraphNet
 from data_amr import VortexSheddingDatasetAMR
@@ -33,16 +41,22 @@ from amr_m4gn.model import AMRM4GN
 from train_amr_m4gn import move_cache
 
 
+VAR_ID = {"u": 0, "v": 1, "p": 2}
+
+
 def rollout_eval(predict_fn, ds, case_idx, steps, ns, mask, device):
-    """Autoregressive rollout; returns velocity RMSE per step (interior nodes).
+    """Autoregressive rollout; returns (rmse_list, fields).
 
     predict_fn(graph) -> pred[N,3] in normalized space (du, dv, p).
     Only `mask` (interior) nodes are updated by the predicted increment.
+    `fields` is a list of [N,3] physical-unit (u, v, p) per step (the predicted
+    field, for the comparison GIF); the ground-truth field is identical across
+    models and is returned by `gt_fields` below.
     """
     mask = mask.to(device).bool().view(-1, 1)
     mask2 = mask.repeat(1, 2)
     spc = ds.num_steps - 1
-    rmse_list = []
+    rmse_list, fields = [], []
     cur_vel_norm = None
     for t in range(steps):
         g = ds[case_idx * spc + t].to(device)
@@ -59,9 +73,66 @@ def rollout_eval(predict_fn, ds, case_idx, steps, ns, mask, device):
         vt_phys = invar[:, 0:2] * ns["velocity_std"] + ns["velocity_mean"]
         new_vel = vt_phys + diff
         cur_vel_norm = (new_vel - ns["velocity_mean"]) / ns["velocity_std"]
+        pred_p = pred[:, 2] * ns["pressure_std"] + ns["pressure_mean"]
         m = mask.view(-1)
         rmse_list.append(torch.sqrt(((new_vel[m] - exact_next[m]) ** 2).mean()).item())
-    return rmse_list
+        fields.append(torch.cat([new_vel, pred_p.unsqueeze(1)], dim=1).cpu().numpy())
+    return rmse_list, fields
+
+
+def gt_fields(ds, case_idx, steps, ns, device):
+    """Ground-truth physical (u, v, p) per step (model-independent)."""
+    spc = ds.num_steps - 1
+    out = []
+    for t in range(steps):
+        g = ds[case_idx * spc + t].to(device)
+        gt_vel_t = g.x[:, 0:2] * ns["velocity_std"] + ns["velocity_mean"]
+        exact_vel = gt_vel_t + (g.y[:, 0:2] * ns["velocity_diff_std"] + ns["velocity_diff_mean"])
+        exact_p = g.y[:, 2] * ns["pressure_std"] + ns["pressure_mean"]
+        out.append(torch.cat([exact_vel, exact_p.unsqueeze(1)], dim=1).cpu().numpy())
+    return out
+
+
+def make_gif_3row(pos, cells, amr, mgn, gt, var_idx, var_name, save_path, frame_skip):
+    """3-row animation (AMR-M4GN / MGN / Ground-Truth) of one field over the
+    rollout. Color scale fixed to the GT range so all rows/frames are comparable.
+    """
+    triang = mtri.Triangulation(pos[:, 0], pos[:, 1], cells)
+    rows = [
+        ("AMR-M4GN", [f[:, var_idx] for f in amr]),
+        ("MGN", [f[:, var_idx] for f in mgn]),
+        ("Ground Truth", [f[:, var_idx] for f in gt]),
+    ]
+    gt_i = rows[2][1]
+    vmin = float(np.min([e.min() for e in gt_i]))
+    vmax = float(np.max([e.max() for e in gt_i]))
+
+    plt.rcParams["image.cmap"] = "inferno"
+    fig, ax = plt.subplots(3, 1, figsize=(16, 12))
+    fig.set_facecolor("black")
+    for a in ax:
+        a.set_facecolor("black")
+
+    def animate(num):
+        n = num * frame_skip
+        for a, (label, seq) in zip(ax, rows):
+            a.cla()
+            a.set_axis_off()
+            a.add_patch(Rectangle((0, 0), 1.4, 0.4, facecolor="navy"))
+            a.tripcolor(triang, seq[n], vmin=vmin, vmax=vmax)
+            a.triplot(triang, "ko-", ms=0.5, lw=0.3)
+            a.set_title(f"{label} ({var_name})  step {n + 1}", color="white")
+            a.set_aspect("auto", adjustable="box")
+            a.autoscale(enable=True, tight=True)
+        fig.subplots_adjust(left=0.05, bottom=0.03, right=0.95, top=0.97,
+                            wspace=0.1, hspace=0.25)
+        return fig
+
+    ani = animation.FuncAnimation(
+        fig, animate, frames=len(gt_i) // frame_skip, interval=100)
+    ani.save(save_path, writer="pillow")
+    plt.close(fig)
+    print(f"Saved: {save_path}")
 
 
 def main():
@@ -77,6 +148,16 @@ def main():
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--processor_size", type=int, default=15)
     p.add_argument("--omega_thresh", type=float, default=8.9)
+    p.add_argument("--gif", action="store_true", default=False,
+                   help="also save a 3-row field animation (AMR / MGN / GT) "
+                        "for each --gif_fields var")
+    p.add_argument("--gif_fields", type=str, nargs="+", default=["u", "v", "p"],
+                   choices=list(VAR_ID.keys()),
+                   help="which field(s) to animate in the 3-row GIF")
+    p.add_argument("--frame_skip", type=int, default=1,
+                   help="use every N-th rollout frame in the GIF")
+    p.add_argument("--gif_dir", type=str, default="./animations",
+                   help="output dir for the comparison GIF(s)")
     p.add_argument("--out_dir", type=str, default="./inference_vis")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
@@ -116,10 +197,12 @@ def main():
                                    weights_only=False)["model"])
     mgn.eval()
 
-    amr_rmse = rollout_eval(lambda g: amr(g, cache, thresholds=thr),
-                            ds, args.case_idx, args.rollout, ns, mask, device)
-    mgn_rmse = rollout_eval(lambda g: mgn(g.x, g.edge_attr, g),
-                            ds, args.case_idx, args.rollout, ns, mask, device)
+    amr_rmse, amr_fields = rollout_eval(
+        lambda g: amr(g, cache, thresholds=thr),
+        ds, args.case_idx, args.rollout, ns, mask, device)
+    mgn_rmse, mgn_fields = rollout_eval(
+        lambda g: mgn(g.x, g.edge_attr, g),
+        ds, args.case_idx, args.rollout, ns, mask, device)
 
     n_amr = sum(p.numel() for p in amr.parameters())
     n_mgn = sum(p.numel() for p in mgn.parameters())
@@ -139,6 +222,17 @@ def main():
     plt.savefig(save, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Saved: {save}")
+
+    if args.gif:
+        os.makedirs(args.gif_dir, exist_ok=True)
+        gt = gt_fields(ds, args.case_idx, args.rollout, ns, device)
+        pos = cache["pos"].cpu().numpy()
+        cells = np.asarray(ds.cells[args.case_idx])
+        for f in args.gif_fields:
+            out = os.path.join(args.gif_dir,
+                               f"compare_case{args.case_idx}_{f}.gif")
+            make_gif_3row(pos, cells, amr_fields, mgn_fields, gt,
+                          VAR_ID[f], f, out, args.frame_skip)
 
 
 if __name__ == "__main__":

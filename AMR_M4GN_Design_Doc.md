@@ -8,7 +8,7 @@
 **主线 Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
 **对比 Baseline**：MGN、X-MeshGraphNet (X-MGN)、M4GN、节点级 Graph-Transformer
 
-> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 🟢 · M5 🟢 小验证档通过（AMR>MGN，全量待算力）· M6 ⬜ · M7 ⬜
+> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 小验证档通过（AMR>MGN，仅"更大训练集"待算力）· M6 ⬜ · M7 ⬜
 > **文档索引**：本设计文档 `AMR_M4GN_Design_Doc.md`；阶段手册 `AMR_M4GN_Progress_M1.md`〜`_M4.md`（各含「拿到代码后每步做什么/为什么/应得什么」的操作说明）。
 
 > **一句话定位**：在非结构三角网格上，用「局部 GNN（短程、高频物理）+ 段级 Transformer（全局、长程压力耦合）+ 物理驱动的自适应 Token 化（AMR）」三者融合的混合架构，在几乎不增加计算量的前提下解决 MeshGraphNet 的长程依赖丢失与过平滑问题，并为大规模湍流（EAGLE）提供可扩展路径。
