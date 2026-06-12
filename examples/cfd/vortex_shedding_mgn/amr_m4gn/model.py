@@ -28,7 +28,7 @@ from .micro_gnn import MicroGNN
 from .macro_transformer import (
     SegmentEncoder, MacroTransformer, dispatch, run_macro_batched,
 )
-from .physics_ops import compute_ns_quantities, denormalize_velocity
+from .physics_ops import compute_ns_quantities, denormalize_velocity, virtual_step
 from .amr_router import route, sample_thresholds, DEFAULT_RANGES
 
 
@@ -50,6 +50,8 @@ class AMRM4GN(nn.Module):
         use_amr: bool = True,
         use_transformer: bool = True,
         use_rwse: bool = True,
+        use_overlap: bool = False,
+        use_virtual_step: bool = False,
     ):
         super().__init__()
         self.hidden = hidden
@@ -57,9 +59,14 @@ class AMRM4GN(nn.Module):
         # use_amr=False        : keep every L1 segment fine (fixed K=K1, no fold)
         # use_transformer=False: decode from micro features only (zero global)
         # use_rwse=False       : zero the segment-level RWSE positional encoding
+        # use_overlap=True     : δ=1 overlap (1-ring halo) in segment pool/dispatch
+        # use_virtual_step=True: route on the forward-Euler virtual velocity
+        #                        field (needs graph.x_prev; else falls back to x)
         self.use_amr = use_amr
         self.use_transformer = use_transformer
         self.use_rwse = use_rwse
+        self.use_overlap = use_overlap
+        self.use_virtual_step = use_virtual_step
         self.micro = MicroGNN(in_nodes=in_nodes, in_edges=in_edges,
                               hidden=hidden, processor_size=processor_size)
         pe_in = rwse_steps + 1 + 2  # rwse + depth + centroid(x,y)
@@ -129,8 +136,15 @@ class AMRM4GN(nn.Module):
             h_cat = torch.cat([h_node, torch.zeros_like(h_node)], dim=1)
             return self.decoder(h_cat)
 
-        # physical velocity for the indicators (D1)
-        u, v = graph.x[:, 0], graph.x[:, 1]
+        # physical velocity for the indicators (D1). With virtual step, route on
+        # the forward-Euler field uv' = uv_t + (uv_t - uv_prev) (Eq.11) to
+        # pre-refine regions about to become active; uv_prev = graph.x_prev
+        # (normalized previous-frame velocity; falls back to uv_t if absent).
+        uv = graph.x[:, 0:2]
+        if self.use_virtual_step:
+            uv_prev = getattr(graph, "x_prev", None)
+            uv = virtual_step(uv, uv_prev if uv_prev is not None else uv)
+        u, v = uv[:, 0], uv[:, 1]
         if self.vel_mean is not None:
             u, v = denormalize_velocity(u, v, self.vel_mean, self.vel_std)
         pos_g = caches[0]["pos"] if B == 1 else torch.cat([c["pos"] for c in caches], 0)
@@ -174,10 +188,12 @@ class AMRM4GN(nn.Module):
         if not self.use_rwse:
             rwse_t = torch.zeros_like(rwse_t)   # M6 ablation "w/o RWSE PE"
 
-        h_seg = self.seg_enc(h_node, kept_assign, T_total, rwse_t, depth, cen_t)
+        ov_edges = graph.edge_index if self.use_overlap else None
+        h_seg = self.seg_enc(h_node, kept_assign, T_total, rwse_t, depth, cen_t,
+                             overlap_edges=ov_edges)
         if B == 1:
             h_seg = self.macro(h_seg)                       # identical to M4
         else:
             h_seg = run_macro_batched(self.macro, h_seg, token_batch, B)
-        h_cat = dispatch(h_seg, kept_assign, h_node)
+        h_cat = dispatch(h_seg, kept_assign, h_node, overlap_edges=ov_edges)
         return self.decoder(h_cat)

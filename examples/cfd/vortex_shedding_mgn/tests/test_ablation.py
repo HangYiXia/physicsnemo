@@ -72,9 +72,44 @@ def _forward_backward_ok(model, graph, cache):
 def test_every_config_forwards_and_backprops():
     graph, cache = _synthetic()
     for kw in (dict(), dict(use_amr=False), dict(use_transformer=False),
-               dict(use_rwse=False)):
+               dict(use_rwse=False), dict(use_overlap=True),
+               dict(use_virtual_step=True)):
         torch.manual_seed(0)
-        _forward_backward_ok(_model(**kw).train(), graph, cache)
+        g = graph.clone()
+        if kw.get("use_virtual_step"):
+            g.x_prev = g.x[:, 0:2].clone()  # supply a previous-frame velocity
+        _forward_backward_ok(_model(**kw).train(), g, cache)
+
+
+def test_overlap_changes_output():
+    """δ=1 overlap must actually alter the prediction vs the no-overlap model
+    (same weights), confirming the halo pool/dispatch is wired."""
+    graph, cache = _synthetic()
+    torch.manual_seed(0)
+    base = _model().eval()
+    torch.manual_seed(0)
+    ov = _model(use_overlap=True).eval()
+    ov.load_state_dict(base.state_dict())  # identical weights
+    with torch.no_grad():
+        a = base(graph, cache, thresholds=_THR)
+        b = ov(graph, cache, thresholds=_THR)
+    assert a.shape == b.shape
+    assert not torch.allclose(a, b), "overlap should change the output"
+
+
+def test_virtual_step_falls_back_without_history():
+    """use_virtual_step=True with no graph.x_prev must equal the no-virtual model
+    (virtual_step returns uv_t when uv_prev is None/equal)."""
+    graph, cache = _synthetic()
+    torch.manual_seed(0)
+    base = _model().eval()
+    torch.manual_seed(0)
+    vs = _model(use_virtual_step=True).eval()
+    vs.load_state_dict(base.state_dict())
+    with torch.no_grad():
+        a = base(graph, cache, thresholds=_THR)        # no x_prev
+        b = vs(graph, cache, thresholds=_THR)           # no x_prev -> fallback
+    assert torch.allclose(a, b), "virtual step w/o history should be a no-op"
 
 
 def test_no_transformer_branch_unused():

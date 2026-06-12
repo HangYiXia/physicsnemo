@@ -10,8 +10,8 @@
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§4.3/4.8/4.9、§7.2、§7.4.4~7.4.6、§八 M4）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`（你的运行机：`C:\GitHub\physicsnemo\...`）
 
-> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · **M4 🟢 管线跑通** · M5 🟢（AMR>MGN，全量待算力）· M6 ⬜ · M7 ⬜
-> **文档索引**：M1 `AMR_M4GN_Progress_M1.md` · M2 `..._M2.md` · M3 `..._M3.md` · M4（本文）· 设计 `AMR_M4GN_Design_Doc.md`
+> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · **M4 ✅ 管线跑通** · M5 🟢（AMR>MGN，仅"更大训练集"待算力）· M6 🟡（八组消融就绪，实跑待算力）· M7 ⬜
+> **文档索引**：总览 `README_AMR_M4GN.md` · 设计 `AMR_M4GN_Design_Doc.md` · 阶段 M4（本文）+ M1〜M3/M5/M6 各 `AMR_M4GN_Progress_M*.md`
 
 > 本文档面向「拿到代码后怎么跑」：§五 每一步都写清楚 **做什么 → 为什么 → 应该得到什么结果**。下文 `✅` 凡涉及「通过」的，除非注明是你实跑的真实数据，否则视为「待你实跑确认」。
 

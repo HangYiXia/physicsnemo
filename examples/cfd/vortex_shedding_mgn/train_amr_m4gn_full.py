@@ -65,6 +65,10 @@ def main():
                    help="M6 ablation: disable macro Transformer (GNN only)")
     p.add_argument("--no_rwse", action="store_true", default=False,
                    help="M6 ablation: zero the segment-level RWSE PE")
+    p.add_argument("--use_overlap", action="store_true", default=False,
+                   help="M6 ablation: enable δ=1 (1-ring halo) segment overlap")
+    p.add_argument("--use_virtual", action="store_true", default=False,
+                   help="M6 ablation: route on the forward-Euler virtual field")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -88,7 +92,8 @@ def main():
         in_nodes=6, in_edges=3, out_dim=3, hidden=args.hidden,
         processor_size=args.processor_size, vel_mean=vel_mean, vel_std=vel_std,
         use_amr=not args.no_amr, use_transformer=not args.no_transformer,
-        use_rwse=not args.no_rwse,
+        use_rwse=not args.no_rwse, use_overlap=args.use_overlap,
+        use_virtual_step=args.use_virtual,
     ).to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)

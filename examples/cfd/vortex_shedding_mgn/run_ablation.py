@@ -6,19 +6,20 @@ evaluates each on the SAME test-case rollout, producing one comparison table
 (printed + CSV) and a bar chart (13_ablation.png). All configs share the data,
 budget and eval, so the per-row delta is the net contribution of one module.
 
-Configs (Design Doc 6.5 table) — runnable here:
-    full            : complete AMR-M4GN
+Configs (Design Doc 6.5 table) — all runnable:
+    full            : complete AMR-M4GN (δ=0, no virtual step — the M5 baseline)
     w/o AMR         : use_amr=False  -> every L1 segment stays fine (fixed K=K1)
     w/o Transformer : use_transformer=False -> decode from the GNN only (~MGN)
     w/o Modal       : geometry-only partition cache (preprocess --no_modal)
     w/o RWSE        : use_rwse=False -> zero the segment positional encoding
     proc7           : processor_size=7 (vs 15) -> GNN depth收益 vs 过平滑
+    w/ overlap      : use_overlap=True  -> δ=1 1-ring halo in pool/dispatch
+    w/ virtual      : use_virtual_step=True -> route on the virtual velocity field
 
-NOT runnable yet (honestly skipped, see README of this file):
-    w/o δ=1 overlap : segment overlap is not implemented in segmentation.py
-    w/o virtual step: virtual_step() exists but is not wired into model.forward
-                      (the model already runs WITHOUT it), so the "with virtual
-                      step" arm has no implementation to compare against.
+Note on overlap/virtual rows: the §6.5 table frames them as "w/o δ overlap" /
+"w/o virtual step". Since the M5 baseline `full` is ALREADY δ=0 and without the
+virtual step, these two rows measure the *marginal effect of ADDING* the module
+(lower RMSE than `full` => the module helps and should be kept).
 
 Prerequisite caches (run preprocess first):
     python preprocess_partitions.py --split train --num_cases N            # modal
@@ -55,14 +56,14 @@ from compare_baselines import rollout_eval
 
 # config name -> (model kwargs override, processor_size, cache suffix, runnable, note)
 CONFIGS = [
-    ("full",            dict(),                          15, "",        True,  "完整模型"),
+    ("full",            dict(),                          15, "",        True,  "完整模型 (δ=0, 无虚拟步)"),
     ("w/o AMR",         dict(use_amr=False),             15, "",        True,  "固定 K=K1，不折叠"),
     ("w/o Transformer", dict(use_transformer=False),     15, "",        True,  "仅 GNN，无全局注意力"),
     ("w/o Modal",       dict(),                          15, "_nomodal",True,  "几何-only 分区缓存"),
     ("w/o RWSE",        dict(use_rwse=False),            15, "",        True,  "去段级位置编码"),
     ("proc7",           dict(),                           7, "",        True,  "GNN 7 步 vs 15 步"),
-    ("w/o overlap",     dict(),                          15, "",        False, "δ 重叠未实现"),
-    ("w/o virtual",     dict(),                          15, "",        False, "虚拟步未接线"),
+    ("w/ overlap",      dict(use_overlap=True),          15, "",        True,  "δ=1 一圈邻居重叠 (相对 full 的增益)"),
+    ("w/ virtual",      dict(use_virtual_step=True),     15, "",        True,  "虚拟步路由 (相对 full 的增益)"),
 ]
 
 

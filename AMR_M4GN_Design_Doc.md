@@ -8,8 +8,8 @@
 **主线 Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
 **对比 Baseline**：MGN、X-MeshGraphNet (X-MGN)、M4GN、节点级 Graph-Transformer
 
-> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 小验证档通过（AMR>MGN，仅"更大训练集"待算力）· **M6 🟡 代码+脚本+单测就绪，消融实跑待算力** · M7 ⬜
-> **文档索引**：本设计文档 `AMR_M4GN_Design_Doc.md`；阶段手册 `AMR_M4GN_Progress_M1.md`〜`_M4.md`（各含「拿到代码后每步做什么/为什么/应得什么」的操作说明）。
+> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 小验证档通过（AMR>MGN，仅"更大训练集"待算力）· **M6 🟡 八组消融代码+脚本+单测就绪，实跑待算力** · M7 ⬜
+> **文档索引**：上手总览 `README_AMR_M4GN.md`（先读这个）；本设计文档 `AMR_M4GN_Design_Doc.md`；阶段手册 `AMR_M4GN_Progress_M1.md`〜`_M6.md`（各含「拿到代码后每步做什么/为什么/应得什么」的操作说明）。
 
 > **一句话定位**：在非结构三角网格上，用「局部 GNN（短程、高频物理）+ 段级 Transformer（全局、长程压力耦合）+ 物理驱动的自适应 Token 化（AMR）」三者融合的混合架构，在几乎不增加计算量的前提下解决 MeshGraphNet 的长程依赖丢失与过平滑问题，并为大规模湍流（EAGLE）提供可扩展路径。
 
@@ -429,17 +429,17 @@ G:U[0.1,2.0]  ω:U[0.2,4.0]  M:U[0.5,10.0]  S:U[0.2,4.0]
 
 ### 6.5 消融实验计划
 
-> M6 落地：开关见 `run_ablation.py`/`model.py`。✅=已接线可跑、❌=未实现/未接线（见 `AMR_M4GN_Progress_M6.md` §0）。
+> M6 落地：开关见 `run_ablation.py`/`model.py`，§6.5 **八行全部可跑**（✅）。δ重叠/虚拟步因基线本就 δ=0/无虚拟步，实现为 `w/ overlap`/`w/ virtual`，度量加上模块的增益。
 
 | 实验 | 配置 | 验证什么 | 可跑 |
 | --- | --- | --- | --- |
-| Full model | AMR-M4GN | 完整性能 | ✅ |
+| Full model | AMR-M4GN（δ=0，无虚拟步）| 完整性能 | ✅ |
 | w/o AMR | 固定 K=256（`use_amr=False`）| AMR 的效率贡献（对照 M4GN 固定 K）| ✅ |
 | w/o Transformer | 只有 15 步 GNN（`use_transformer=False`）| Transformer 的精度贡献（对照 MGN）| ✅ |
 | w/o Modal Decomp | 几何-only 分区（预处理 `--no_modal`）| 模态分解的分区质量贡献 | ✅ |
 | w/o RWSE PE | 去掉段级 RWSE（`use_rwse=False`）| 位置编码必要性 | ✅ |
-| w/o δ=1 重叠 | δ=0 | 段重叠对段边界连续性的贡献 | ❌ 未实现 |
-| w/o 虚拟步 | 仅当前帧 phys | 虚拟步外推对 rollout 的贡献 | ❌ 未接线 |
+| δ=1 重叠 | `use_overlap=True`（1 圈邻居 halo）| 段重叠对段边界连续性的贡献 | ✅ |
+| 虚拟步 | `use_virtual_step=True`（路由用虚拟场）| 虚拟步外推对 rollout 的贡献 | ✅ |
 | 7 步 vs 15 步 GNN | processor_size=7/15 | 深度 GNN 的收益 vs 过平滑 | ✅ |
 
 ---
@@ -739,11 +739,11 @@ class AMRM4GN(nn.Module):
 ### M6 — 消融实验（5 天）
 
 - **目标**：验证各模块贡献。
-- **改动**：模型加开关 `use_amr/use_transformer/use_rwse`（`model.py` forward 零侵入接线）、预处理加 `--no_modal`、训练入口透传开关、新建编排脚本 `run_ablation.py` + 单测 `tests/test_ablation.py`。`processor_size` 本就是参数（7/15）。
+- **改动**：模型加开关 `use_amr/use_transformer/use_rwse/use_overlap/use_virtual_step`（`model.py` forward 零侵入接线；δ=1 重叠在 `macro_transformer.py` 的池化/分发做 1-ring halo；虚拟步用 `data_amr` 暴露的 `graph.x_prev`）、预处理加 `--no_modal`、训练入口透传开关、新建编排脚本 `run_ablation.py` + 多 case 评估 `eval_rollout.py` + 单测 `tests/test_ablation.py`。`processor_size` 本就是参数（7/15）。
 - **配合数据**：全量数据，复用 M5 流程。
 - **退出标准**：§6.5 消融表 + 分析；明确各模块净贡献。
 - **🚩 决策门 D8（裁剪）**：根据消融结果，对净贡献为负/可忽略的模块（如 RWSE、虚拟步）在最终模型中关闭，简化架构。
-- **状态 🟡（代码就绪，实跑待算力）**：开关/脚本/单测全部完成，覆盖 §6.5 的 **6/8 行**；**未实跑**（本机无算力）。未覆盖 2 行：`w/o δ=1 重叠`（segmentation 无重叠逻辑，缺对象）、`w/o 虚拟步`（`virtual_step()` 已实现但 forward 未喂 `u_prev`，缺「有虚拟步」对照臂）——需补实现后纳入。详见 `AMR_M4GN_Progress_M6.md`。
+- **状态 🟡（代码就绪，实跑待算力）**：开关/脚本/单测全部完成，§6.5 **八行全部可跑**（δ重叠、虚拟步已接线，因基线本就 δ=0/无虚拟步，实现为「w/ overlap」「w/ virtual」度量增益）；**未实跑**（本机无算力）。另附 `eval_rollout.py` 多 test case 平均评估补 M5 单 case 短板。详见 `AMR_M4GN_Progress_M6.md`。
 
 ### M7 — EAGLE 大规模扩展（可选，5 天）
 

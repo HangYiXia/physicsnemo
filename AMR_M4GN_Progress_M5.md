@@ -4,7 +4,8 @@
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
 **配套文档**：设计 `AMR_M4GN_Design_Doc.md`；阶段 `AMR_M4GN_Progress_M1.md`〜`_M4.md`
 
-> **里程碑总进度**：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · **M5 🟢（小验证档全部完成，仅"更大训练集"待算力）** · M6 ⬜ · M7 ⬜
+> **里程碑总进度**：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · **M5 🟢（小验证档全部完成，仅"更大训练集"待算力）** · M6 🟡（八组消融就绪，实跑待算力）· M7 ⬜
+> **文档索引**：总览 `README_AMR_M4GN.md` · 设计 `AMR_M4GN_Design_Doc.md` · 阶段 M5（本文）+ M1〜M4/M6 各 `AMR_M4GN_Progress_M*.md`
 
 ---
 
@@ -371,7 +372,7 @@ pytest tests/ -v
 
 **下一步（M5 完整退出 / M6–M7）**：
 - 放大到中/全量训练集（**唯一待算力项**）；
-- 多 test case 平均 rollout 指标（建议加批量评估脚本）；
+- 多 test case 平均 rollout 指标 → **已提供 `eval_rollout.py`**（多 case 平均 ±std，AMR±MGN；M6 阶段产出，实跑待算力）；
 - 加 X-MGN 等 baseline、（可选）等参对照；
 - §6.4 全套指标（FLOPs/显存/GPU 时间/Strouhal 数）。
 

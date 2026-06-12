@@ -49,12 +49,22 @@ class SegmentEncoder(nn.Module):
         rwse: Tensor,          # [T, 16]
         depth: Tensor,         # [T]
         centroid: Tensor,      # [T, 2]
+        overlap_edges: Tensor | None = None,  # [2,E] -> δ=1 halo pooling
+        overlap_w: float = 1.0,
     ) -> Tensor:               # [T, d]
         d = h_node.shape[1]
         seg_sum = torch.zeros(T, d, dtype=h_node.dtype, device=h_node.device)
         seg_sum.index_add_(0, kept_assign, h_node)
         cnt = torch.zeros(T, dtype=h_node.dtype, device=h_node.device)
         cnt.index_add_(0, kept_assign, torch.ones_like(kept_assign, dtype=h_node.dtype))
+        if overlap_edges is not None:
+            # δ=1 overlap: each node `src` also contributes (weight overlap_w) to
+            # the token of every graph neighbor `dst`, so token features absorb a
+            # 1-ring halo and segment boundaries are smoothed.
+            src, dst = overlap_edges[0], overlap_edges[1]
+            tok = kept_assign[dst]
+            seg_sum.index_add_(0, tok, overlap_w * h_node[src])
+            cnt.index_add_(0, tok, overlap_w * torch.ones_like(src, dtype=h_node.dtype))
         seg_mean = seg_sum / cnt.clamp(min=1.0).unsqueeze(1)
 
         h_seg = self.node_mlp(seg_mean)
@@ -94,12 +104,22 @@ class MacroTransformer(nn.Module):
         return out.squeeze(0) if squeeze else out
 
 
-def dispatch(h_seg_out: Tensor, kept_assign: Tensor, h_node: Tensor) -> Tensor:
+def dispatch(h_seg_out: Tensor, kept_assign: Tensor, h_node: Tensor,
+             overlap_edges: Tensor | None = None, overlap_w: float = 1.0) -> Tensor:
     """h_seg_out [T, d], kept_assign [N], h_node [N, d] -> h_cat [N, 2d].
 
     Each node grabs its token's global feature and concatenates with its own
-    local feature (concat, not add)."""
+    local feature (concat, not add). With `overlap_edges` (δ=1), the global
+    feature is the (weighted) mean of the node's own token plus its 1-ring
+    neighbors' tokens, matching the overlap pooling in SegmentEncoder."""
     h_global = h_seg_out[kept_assign]          # [N, d]
+    if overlap_edges is not None:
+        src, dst = overlap_edges[0], overlap_edges[1]
+        acc = h_global.clone()
+        deg = torch.ones(h_node.shape[0], dtype=h_node.dtype, device=h_node.device)
+        acc.index_add_(0, src, overlap_w * h_seg_out[kept_assign[dst]])
+        deg.index_add_(0, src, overlap_w * torch.ones_like(src, dtype=h_node.dtype))
+        h_global = acc / deg.unsqueeze(1)
     return torch.cat([h_node, h_global], dim=1)  # [N, 2d]
 
 

@@ -55,6 +55,11 @@ class VortexSheddingDatasetAMR(VortexSheddingDataset):
         out = super().__getitem__(idx)
         graph = out[0] if isinstance(out, tuple) else out
         gidx = idx // (self.num_steps - 1)
+        tidx = idx % (self.num_steps - 1)
         graph.pos = self.mesh_pos[gidx].float()
         graph.gidx = gidx
+        # previous-frame normalized velocity for the virtual-step router (M6).
+        # tidx==0 has no history -> reuse the current frame (virtual step = id).
+        prev_t = tidx - 1 if tidx > 0 else 0
+        graph.x_prev = self.node_features[gidx]["velocity"][prev_t].float()
         return graph
