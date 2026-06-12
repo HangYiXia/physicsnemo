@@ -38,6 +38,10 @@ def main():
     p.add_argument("--processor_size", type=int, default=15)
     p.add_argument("--ckpt_dir", type=str, default="./checkpoints_mgn")
     p.add_argument("--ckpt_every", type=int, default=20)
+    p.add_argument("--clip", type=float, default=1.0,
+                   help="grad-norm clip; same default as the AMR trainer.")
+    p.add_argument("--warmup", type=int, default=5,
+                   help="linear-LR warmup epochs (lr/10 -> lr).")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -68,26 +72,46 @@ def main():
     model.train()
     print(f"[MGN baseline] {args.num_cases} cases x {args.num_steps-1} steps, "
           f"batch={args.batch_size}, {args.epochs} epochs, params={nparams/1e6:.2f}M, "
-          f"device={device}")
+          f"device={device}, clip={args.clip}, warmup={args.warmup}")
+    base_lr = args.lr
+    nan_skipped_total = 0
     for epoch in range(args.epochs):
-        epoch_loss, nb = 0.0, 0
+        if args.warmup > 0 and epoch < args.warmup:
+            warm = (epoch + 1) / max(args.warmup, 1)
+            for pg in opt.param_groups:
+                pg["lr"] = base_lr * (0.1 + 0.9 * warm)
+        epoch_loss, nb, nan_skipped, gn_sum = 0.0, 0, 0, 0.0
         for batch in loader:
             batch = batch.to(device)
             opt.zero_grad()
             pred = model(batch.x, batch.edge_attr, batch)
             loss = per_channel_nmse(pred, batch.y)
+            if not torch.isfinite(loss):
+                nan_skipped += 1
+                continue
             loss.backward()
+            if args.clip > 0:
+                gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+                gn_sum += float(gn)
             opt.step()
             epoch_loss += loss.item()
             nb += 1
-        sched.step()
+        if args.warmup == 0 or epoch >= args.warmup:
+            sched.step()
+        nan_skipped_total += nan_skipped
         epoch_loss /= max(nb, 1)
         if epoch % 5 == 0 or epoch == args.epochs - 1:
-            print(f"epoch {epoch:4d}  NMSE {epoch_loss:.4e}  lr {sched.get_last_lr()[0]:.2e}")
+            avg_gn = gn_sum / max(nb, 1) if args.clip > 0 else float("nan")
+            extra = f"  grad_norm {avg_gn:.2f}" if args.clip > 0 else ""
+            extra += f"  nan_skipped {nan_skipped}" if nan_skipped else ""
+            print(f"epoch {epoch:4d}  NMSE {epoch_loss:.4e}  "
+                  f"lr {opt.param_groups[0]['lr']:.2e}{extra}")
         if (epoch + 1) % args.ckpt_every == 0 or epoch == args.epochs - 1:
             torch.save({"epoch": epoch, "model": model.state_dict(),
                         "opt": opt.state_dict()},
                        os.path.join(args.ckpt_dir, f"mgn_epoch{epoch}.pt"))
+    if nan_skipped_total:
+        print(f"[warn] skipped {nan_skipped_total} NaN/inf batches over training.")
     print(f"done. checkpoints in {args.ckpt_dir}")
 
 

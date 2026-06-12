@@ -79,12 +79,21 @@ def load_caches(cache_dir, split, n, suffix, device):
     return out
 
 
-def train_one(model, loader, caches, epochs, lr, lr_decay, thr, device):
+def train_one(model, loader, caches, epochs, lr, lr_decay, thr, device,
+              clip=1.0, warmup=5):
+    """Train one ablation model. Mirrors `train_amr_m4gn_full.py`'s safety net:
+    grad-norm clip + linear LR warmup + NaN/inf batch guard. Required — without
+    it batched training can diverge in the first 5–10 epochs (NMSE → ~1.0)."""
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.ExponentialLR(opt, gamma=lr_decay)
     model.train()
     last = float("nan")
+    base_lr = lr
     for epoch in range(epochs):
+        if warmup > 0 and epoch < warmup:
+            w = (epoch + 1) / max(warmup, 1)
+            for pg in opt.param_groups:
+                pg["lr"] = base_lr * (0.1 + 0.9 * w)
         ep, nb = 0.0, 0
         for batch in loader:
             batch = batch.to(device)
@@ -92,10 +101,15 @@ def train_one(model, loader, caches, epochs, lr, lr_decay, thr, device):
             opt.zero_grad()
             pred = model(batch, cs, thresholds=thr)
             loss = per_channel_nmse(pred, batch.y)
+            if not torch.isfinite(loss):
+                continue
             loss.backward()
+            if clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
             opt.step()
             ep += loss.item(); nb += 1
-        sched.step()
+        if warmup == 0 or epoch >= warmup:
+            sched.step()
         last = ep / max(nb, 1)
     return last
 
@@ -113,6 +127,10 @@ def main():
     p.add_argument("--noise_std", type=float, default=0.02)
     p.add_argument("--hidden", type=int, default=128)
     p.add_argument("--omega_thresh", type=float, default=8.9)
+    p.add_argument("--clip", type=float, default=1.0,
+                   help="grad-norm clip (mirrors train_amr_m4gn_full.py default)")
+    p.add_argument("--warmup", type=int, default=5,
+                   help="linear-LR warmup epochs (mirrors train_amr_m4gn_full.py default)")
     p.add_argument("--test_split", type=str, default="test")
     p.add_argument("--test_case", type=int, default=0)
     p.add_argument("--test_num_steps", type=int, default=90)
@@ -168,7 +186,8 @@ def main():
                         **kw).to(device)
         n_par = sum(q.numel() for q in model.parameters()) / 1e6
         train_nmse = train_one(model, loader, train_caches, args.epochs,
-                               args.lr, args.lr_decay, thr, device)
+                               args.lr, args.lr_decay, thr, device,
+                               clip=args.clip, warmup=args.warmup)
         model.eval()
         rmse, _ = rollout_eval(lambda g: model(g, test_cache, thresholds=thr),
                                ds_te, args.test_case, args.rollout, ns, mask, device)

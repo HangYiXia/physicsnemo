@@ -345,6 +345,18 @@ NMSE = mean((pred − target)²) / mean(target²).clamp_min(eps)
 
 优势：自动适应尺度差异——速度增量 ~O(10⁻³) 与压力 ~O(1) 不会互相淹没。可叠加噪声纠正项（§4.5）。
 
+**训练数值稳定性**（2026-06-12 补充,实战发现）：
+
+batched 训练（M5）下,初版 `train_amr_m4gn_full.py` 仅有 Adam + ExponentialLR,无任何梯度防护。在 20 case×100 步×200 epoch 设定下出现 **epoch 5~10 突发发散**:某 batch 极端梯度推权重进死区,后续输出塌缩到 0,NMSE 卡在 ~1.0。修复方案（已落地,默认开启）:
+
+1. **梯度范数裁剪**:`clip_grad_norm_(max_norm=1.0)`。最关键的一项,早期梯度尖峰最常见的来源是物理量算子（denormalized G/ω/M/S）在随机权重下的高方差。
+2. **线性 LR 暖启动**:前 5 epoch lr 从 base_lr/10 升到 base_lr,跨过最危险的早期 epoch。
+3. **NaN/inf batch 守护**:`if not torch.isfinite(loss): continue`,杜绝单 batch NaN 污染。
+4. **诊断日志**:每 5 epoch 打印 `grad_norm` 与 `nan_skipped`,便于回溯。
+5. AMR 与 MGN baseline 同步加同样默认值,保证对比公平。
+
+详细失败案例与修复见 `docs/progress/M5.md` §9。
+
 ---
 
 ## 五、与 Baseline 的对比分析

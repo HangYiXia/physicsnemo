@@ -68,6 +68,8 @@ python -m scripts.train_amr_m4gn_full --data_dir ./raw_dataset/cylinder_flow/cyl
 python -m scripts.inference_amr_m4gn --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch49.pt --split test --case_idx 0 --num_steps 50 --rollout 40 --omega_thresh 8.9 --gif --gif_fields u v p
 ```
 
+> **训练稳定性默认值**（自动开启,无需加参）:`--clip 1.0`(梯度范数裁剪)+ `--warmup 5`(线性 lr 暖启动)+ NaN/inf batch 自动跳过。每 5 epoch 日志会打印 `grad_norm`,看不到 ~1.0 卡死即正常。详见 `docs/progress/M5.md` §9 失败案例。
+
 **应该看到**：
 - 训练终端 NMSE 从 ~3 降到 ~0.08；
 - `inference_vis/10_rollout_rmse_case0.png`：误差随步数上升后**平台饱和、不发散**；

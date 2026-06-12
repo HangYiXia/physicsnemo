@@ -72,6 +72,13 @@ def main():
                    help="M6 ablation: enable δ=1 (1-ring halo) segment overlap")
     p.add_argument("--use_virtual", action="store_true", default=False,
                    help="M6 ablation: route on the forward-Euler virtual field")
+    p.add_argument("--clip", type=float, default=1.0,
+                   help="grad-norm clip (0 to disable). Default 1.0 — required, "
+                        "without it batched AMR-M4GN training can diverge after a "
+                        "few epochs (NMSE jumps to ~1 = collapsed-to-zero output).")
+    p.add_argument("--warmup", type=int, default=5,
+                   help="linear-LR warmup epochs from lr/10 -> lr (helps the "
+                        "early-epoch spike that triggers divergence).")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -108,27 +115,52 @@ def main():
 
     model.train()
     print(f"[train] {args.num_cases} cases x {args.num_steps-1} steps, "
-          f"batch_size={args.batch_size}, {args.epochs} epochs, device={device}")
+          f"batch_size={args.batch_size}, {args.epochs} epochs, device={device}, "
+          f"clip={args.clip}, warmup={args.warmup}")
+    base_lr = args.lr
+    nan_skipped_total = 0
     for epoch in range(args.epochs):
-        epoch_loss, nb = 0.0, 0
+        # linear LR warmup for the first `warmup` epochs (lr/10 -> lr)
+        if args.warmup > 0 and epoch < args.warmup:
+            warm = (epoch + 1) / max(args.warmup, 1)
+            wlr = base_lr * (0.1 + 0.9 * warm)
+            for pg in opt.param_groups:
+                pg["lr"] = wlr
+        epoch_loss, nb, nan_skipped, gn_sum = 0.0, 0, 0, 0.0
         for batch in loader:
             batch = batch.to(device)
             cs = [caches[int(g)] for g in batch.gidx]
             opt.zero_grad()
             pred = model(batch, cs, thresholds=thr)
             loss = per_channel_nmse(pred, batch.y)
+            # NaN/inf guard: a single bad batch can poison the weights forever
+            if not torch.isfinite(loss):
+                nan_skipped += 1
+                continue
             loss.backward()
+            if args.clip > 0:
+                gn = torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
+                gn_sum += float(gn)
             opt.step()
             epoch_loss += loss.item()
             nb += 1
-        sched.step()
+        # only step the exponential decay AFTER warmup ends
+        if args.warmup == 0 or epoch >= args.warmup:
+            sched.step()
+        nan_skipped_total += nan_skipped
         epoch_loss /= max(nb, 1)
         if epoch % 5 == 0 or epoch == args.epochs - 1:
-            print(f"epoch {epoch:4d}  NMSE {epoch_loss:.4e}  lr {sched.get_last_lr()[0]:.2e}")
+            avg_gn = gn_sum / max(nb, 1) if args.clip > 0 else float("nan")
+            extra = f"  grad_norm {avg_gn:.2f}" if args.clip > 0 else ""
+            extra += f"  nan_skipped {nan_skipped}" if nan_skipped else ""
+            print(f"epoch {epoch:4d}  NMSE {epoch_loss:.4e}  "
+                  f"lr {opt.param_groups[0]['lr']:.2e}{extra}")
         if (epoch + 1) % args.ckpt_every == 0 or epoch == args.epochs - 1:
             path = os.path.join(args.ckpt_dir, f"{args.tag}_epoch{epoch}.pt")
             torch.save({"epoch": epoch, "model": model.state_dict(),
                         "opt": opt.state_dict()}, path)
+    if nan_skipped_total:
+        print(f"[warn] skipped {nan_skipped_total} NaN/inf batches over training.")
     print(f"done. checkpoints in {args.ckpt_dir}")
 
 
