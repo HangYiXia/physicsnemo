@@ -408,6 +408,239 @@ compare_baselines.py    ✅ 新建：两 checkpoint → test 同款 rollout → 
 | Design Doc | M5 落地 |
 | --- | --- |
 | §7.2-C 批内段偏移 + padding mask | 小步 1：`pack_segments`/`run_macro_batched`（本轮）；小步 2：`model` 集成 |
-| §7.6 完整训练/推理入口 | 小步 3 `train_amr_m4gn_full.py`（✅）、小步 4 `inference_amr_m4gn.py`（✅ 待实跑）|
-| §八 M5 退出标准（vs baseline 指标）| 小步 6 `train_mgn_baseline.py` + `compare_baselines.py`（✅ 脚本就绪，待实跑训练+对比）|
+| §7.6 完整训练/推理入口 | 小步 3 `train_amr_m4gn_full.py`（✅）、小步 4 `inference_amr_m4gn.py`（✅ 实跑通过，含 rollout/GIF）|
+| §八 M5 退出标准（vs baseline 指标）| 小步 6 `train_mgn_baseline.py` + `compare_baselines.py`（✅ 实跑完成，AMR 全程优于 MGN）|
 | 决策门 D3 最终标定 | 小步 5 `calibrate_thresholds.py`（✅ 已拍板：ω∈[2.83,25.8]，K0/K1=64/256）|
+
+---
+
+## 附录 A：`vortex_shedding_mgn/` 全代码关系图
+
+整个目录分四层：**① 原始 baseline（NVIDIA 自带）** → **② AMR-M4GN 模型库（`amr_m4gn/`）** → **③ 离线预处理 + 数据封装** → **④ 训练/推理/对比/标定入口**。数据流向：
+
+```
+                      raw_dataset/cylinder_flow/*.tfrecord
+                                   │
+          ┌────────────────────────┴───────────────────────────┐
+          │ (原始 baseline 路线)                                  │ (AMR-M4GN 路线)
+          ▼                                                      ▼
+  VortexSheddingDataset                          preprocess_partitions.py ──写──► amr_cache/partition_cache_*.pt
+   (physicsnemo 内置)                                   │  (几何/分区/PE/面积，与时间无关，只跑一次)
+          │                                             │  用到: modal_decomp / segmentation / pe / amr_router(build_l1_to_l0)
+          ▼                                             ▼
+       train.py ──► checkpoints/                 data_amr.py: VortexSheddingDatasetAMR
+   inference.py ──► animations/*.gif               (子类，额外暴露 graph.pos / gidx / get_cache)
+   (stock MGN，hydra+DDP)                                 │
+                                                          ▼
+                                          amr_m4gn/model.py: AMRM4GN.forward(graph, cache, thresholds)
+                                          ┌──────────────────┼─────────────────────────────┐
+                                          ▼                  ▼                             ▼
+                                  micro_gnn.MicroGNN   physics_ops.compute_ns_quantities   amr_router.route
+                                  (MGN 旁路 decoder)    (G/ω/M/S，按物理速度)               (折叠/保留→token)
+                                          │                  └──────────► thresholds ◄──────┘
+                                          ▼
+                                  macro_transformer: SegmentEncoder → MacroTransformer → dispatch → decoder → pred[N,3]
+```
+
+**训练/推理入口如何复用模型库**（实线=import 调用）：
+
+| 入口脚本 | import 的核心件 | 产物 |
+| --- | --- | --- |
+| `train_amr_m4gn.py`（M4 单 case overfit）| `AMRM4GN`、`build_cache`、`VortexSheddingDatasetAMR`；定义 `per_channel_nmse`/`move_cache`（被其他脚本复用）| 终端 NMSE 日志 |
+| `train_amr_m4gn_full.py`（M5 多 case 正式训练）| `AMRM4GN`、`VortexSheddingDatasetAMR`、`per_channel_nmse`/`move_cache`（来自 `train_amr_m4gn`）| `checkpoints_amr/amr_m4gn_epoch*.pt` |
+| `train_mgn_baseline.py`（M5 同预算 MGN 基线）| `MeshGraphNet`、`VortexSheddingDataset`、`per_channel_nmse` | `checkpoints_mgn/mgn_epoch*.pt` |
+| `inference_amr_m4gn.py`（M5 预测/rollout/GIF）| `AMRM4GN`、`VortexSheddingDatasetAMR`、`move_cache` | `inference_vis/09_*、10_*.png`、`animations/amr_m4gn_*.gif` |
+| `compare_baselines.py`（M5 AMR vs MGN）| `AMRM4GN`、`MeshGraphNet`、`VortexSheddingDatasetAMR`、`move_cache` | `inference_vis/12_compare_rollout_*.png` |
+| `calibrate_thresholds.py`（M5 D3 标定）| `compute_ns_quantities`/`denormalize_velocity`、`aggregate_per_segment`/`route` | `inference_vis/11_threshold_calibration.png` |
+| `visualize_partition.py`（M1–M3 诊断图）| `modal_decomp`/`segmentation`/`physics_ops`/`amr_router`；定义 `load_single_case`（被 `preprocess_partitions` 复用）| `partition_vis/case*/*.png` |
+
+> **关键复用关系（务必记牢）**：
+> - `per_channel_nmse` 和 `move_cache` 的**单一定义在 `train_amr_m4gn.py`**，全量训练、推理、对比脚本都从它 import——改 loss/搬运逻辑只改这一处。
+> - `build_cache`（建几何缓存）定义在 `preprocess_partitions.py`；`load_single_case`（读单 case TFRecord）定义在 `visualize_partition.py`。两者被 `train_amr_m4gn.py`（按需现建缓存）/`preprocess_partitions.py` 复用。
+> - **rollout 逻辑只有一份**：`inference_amr_m4gn.run_rollout`（单模型 + GIF）与 `compare_baselines.rollout_eval`（双模型对比）是同一套自回归规则（内部节点用预测增量积分、边界保 GT），刻意保持一致以保证「09/10 图」与「12 对比图」口径相同。**新增 GIF 直接扩展 `run_rollout` 收集场，不另写脚本。**
+
+---
+
+## 附录 B：所有脚本作用 + 逐参数含义
+
+> 约定：`required` = 必填；其余给默认值。`<...>` 为占位。
+
+### B.1 `preprocess_partitions.py` — 离线几何/分区缓存（**第一步必跑**）
+
+**作用**：每个 case 跑一次「模态分解 → 两级分区(L0/L1) → 段级&节点级 RWSE → l1→l0 父子映射 → 段质心 → 节点 Voronoi 面积」，存成 `partition_cache_{split}_{gidx}.pt`。因网格静止，缓存与时间步无关，只生成一次后被训练/推理反复加载。
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `--data_dir` | required | TFRecord 数据目录（含 `meta.json`、`{split}.tfrecord`）|
+| `--split` | `test` | 数据划分：`train`/`valid`/`test`。**注意**：训练用 `train`、对比/推理用 `test`，要分别预处理 |
+| `--num_cases` | 1 | 处理多少个 case（从 `case_start` 起）|
+| `--case_start` | 0 | 起始 case 序号 |
+| `--K0` | 64 | L0（粗）目标段数 |
+| `--K1` | 256 | L1（细）目标段数；L1 嵌套细分 L0 |
+| `--num_modes` | 6 | Laplacian 特征模态数（分区引导特征 `f_md`）|
+| `--tau` | 1.0 | SLIC 紧致度（段形状规整 vs 贴合特征的权衡）|
+| `--steps` | 16 | RWSE 随机游走步数（PE 维度）|
+| `--out_dir` | `./amr_cache` | 缓存输出目录 |
+
+### B.2 `train_amr_m4gn_full.py` — AMR-M4GN 正式训练（M5）
+
+**作用**：多 case、PyG 批处理（`batch_size>1`）、逐通道 NMSE、指数 LR 衰减、定期 checkpoint 的训练入口。**前置**：先跑 `preprocess_partitions.py --split train`。
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `--data_dir` | required | TFRecord 目录 |
+| `--cache_dir` | required | `partition_cache_train_*.pt` 所在目录 |
+| `--split` | `train` | 训练划分 |
+| `--num_cases` | 4 | 训练 case 数（须 ≤ 已预处理的缓存数）|
+| `--num_steps` | 50 | 每 case 取前 N 帧；实际训练样本 = `num_steps-1`（相邻帧增量）|
+| `--batch_size` | 2 | 每批图数；批内逐图路由 + 全局 token 偏移 + 注意力按图隔离 |
+| `--epochs` | 50 | 训练轮数 |
+| `--lr` | 1e-3 | Adam 初始学习率 |
+| `--lr_decay` | 0.9999991 | 指数 LR 衰减 γ（每 epoch `lr*=γ`）|
+| `--noise_std` | 0.0 | 训练噪声标准差（加在输入速度上，提升 rollout 稳定性）|
+| `--hidden` | 128 | 隐藏维度（encoder/processor/decoder/transformer 通用）|
+| `--processor_size` | 15 | MicroGNN 消息传递层数（局部感受野跳数）|
+| `--omega_thresh` | 30.0 | 固定涡量路由阈值（绝对物理量级）。**本数据集标定值≈8.9** |
+| `--sample_thresh` | False | 开启后改为「每图按区间采样阈值」（Design Doc 4.7），忽略 `--omega_thresh` |
+| `--ckpt_dir` | `./checkpoints_amr` | checkpoint 输出目录 |
+| `--ckpt_every` | 10 | 每多少 epoch 存一次（末轮必存）|
+| `--device` | 自动 | `cuda`/`cpu` |
+
+### B.3 `train_mgn_baseline.py` — MGN 同预算基线（M5）
+
+**作用**：用**完全相同**的数据/损失/噪声/lr/epoch 训练原版 `MeshGraphNet`，唯一区别是模型本身（无 AMR 路由），以保证对比公平。
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `--data_dir` | required | TFRecord 目录 |
+| `--split` | `train` | 训练划分 |
+| `--num_cases` | 20 | 训练 case 数 |
+| `--num_steps` | 100 | 每 case 帧数（样本数 = `num_steps-1`）|
+| `--batch_size` | 2 | 批大小 |
+| `--epochs` | 200 | 训练轮数 |
+| `--lr` / `--lr_decay` | 1e-3 / 0.9999991 | 同 AMR，保证公平 |
+| `--noise_std` | 0.02 | 训练噪声 |
+| `--hidden` / `--processor_size` | 128 / 15 | 同 AMR 的 MicroGNN 配置 |
+| `--ckpt_dir` | `./checkpoints_mgn` | checkpoint 目录 |
+| `--ckpt_every` | 20 | 存档间隔 |
+| `--device` | 自动 | 设备 |
+
+> MGN baseline **不需要** `cache_dir`/`omega_thresh`（无分区路由）。
+
+### B.4 `inference_amr_m4gn.py` — 预测 / rollout / **GIF** 可视化（M5）
+
+**作用**：加载 AMR-M4GN checkpoint，三种模式：
+- **默认（单帧）**：预测某一帧，画 (du,dv,p) 的 pred/GT/|误差| 3×3 面板 → `09_prediction_*.png`，并打印逐通道 NMSE/RMSE。
+- **`--rollout R`**：自回归滚动 R 步，画速度 RMSE-步数曲线（误差累积）→ `10_rollout_rmse_*.png`。
+- **`--gif`**：在 rollout 基础上，为每个 `--gif_fields` 变量存「上=预测 / 下=真值」的场动画 GIF（仿原 `inference.py` 风格）→ `animations/amr_m4gn_case{idx}_{field}.gif`。
+
+**rollout/gif 需内部节点掩码 `rollout_mask`，故必须 `--split test`。**
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `--data_dir` | required | TFRecord 目录 |
+| `--cache_dir` | required | 分区缓存目录（须含对应 split 的缓存）|
+| `--ckpt` | required | AMR-M4GN checkpoint 路径（如 `amr_m4gn_epoch199.pt`）|
+| `--split` | `train` | 划分；**用 rollout/gif 时改 `test`** |
+| `--case_idx` | 0 | 用哪个 case |
+| `--timestep` | 25 | 单帧模式画第几帧 |
+| `--num_steps` | 50 | 数据集每 case 取帧数 |
+| `--hidden` / `--processor_size` | 128 / 15 | 须与训练时一致，否则权重 load 失败 |
+| `--omega_thresh` | 30.0 | 路由阈值，须与训练一致（本数据集 8.9）|
+| `--rollout` | 0 | >0 时滚动该步数；0 且无 `--gif` 则单帧模式 |
+| `--gif` | False | 开启则在 rollout 后生成 GIF |
+| `--gif_fields` | `u v p` | 要动画化的场（任意子集）|
+| `--frame_skip` | 1 | GIF 抽帧（每 N 帧取一帧，加速/减小体积）|
+| `--gif_dir` | `./animations` | GIF 输出目录 |
+| `--out_dir` | `./inference_vis` | png 输出目录 |
+| `--device` | 自动 | 设备 |
+
+### B.5 `compare_baselines.py` — AMR-M4GN vs MGN rollout 对比（M5）
+
+**作用**：同一 test case 上对两模型跑**同一套** rollout，输出 step-1/最终/平均速度 RMSE、参数量，以及两条误差曲线 → `12_compare_rollout_case{idx}.png`。
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `--data_dir` | required | TFRecord 目录 |
+| `--cache_dir` | required | 分区缓存目录 |
+| `--amr_ckpt` | required | AMR-M4GN checkpoint |
+| `--mgn_ckpt` | required | MGN baseline checkpoint |
+| `--split` | `test` | 划分（需 `rollout_mask`）|
+| `--case_idx` | 0 | 对比哪个 case |
+| `--num_steps` | 90 | 数据集帧数 |
+| `--rollout` | 80 | 滚动步数 |
+| `--hidden` / `--processor_size` | 128 / 15 | 须与两模型训练一致 |
+| `--omega_thresh` | 8.9 | AMR 路由阈值（标定值）|
+| `--out_dir` | `./inference_vis` | 输出目录 |
+| `--device` | 自动 | 设备 |
+
+### B.6 `calibrate_thresholds.py` — D3 阈值标定（M5，**无需 checkpoint**）
+
+**作用**：统计真实数据上每个 L1 段的 |ω| 分布，扫描候选绝对阈值看 token 数 T 落点，推荐让 T 落在 [K0,K1] 中段的阈值 + 训练期采样区间 → `11_threshold_calibration.png`。物理量只依赖速度+几何，**不需要训练好的模型**。
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `--data_dir` | required | TFRecord 目录 |
+| `--cache_dir` | required | 分区缓存目录 |
+| `--split` | `train` | 划分 |
+| `--num_cases` | 4 | 统计用 case 数 |
+| `--num_steps` | 50 | 每 case 帧数 |
+| `--stride` | 5 | 每隔几帧采一帧（降算量）|
+| `--n_thresh` | 12 | 候选阈值个数（扫描分辨率）|
+| `--out_dir` | `./inference_vis` | 输出目录 |
+
+### B.7 `visualize_partition.py` — 预处理诊断图（M1–M3）
+
+**作用**：单 case 跑模态分解+分区+（可选）物理量/路由，输出网格/特征模态/障碍距离/L0/L1 分区/段邻接/物理指标/路由结果等诊断 png 到 `partition_vis/case{idx}/`。也提供被 `preprocess_partitions` 复用的 `load_single_case`。
+
+| 参数 | 默认 | 含义 |
+| --- | --- | --- |
+| `--data_dir` | `./raw_dataset/.../cylinder_flow` | TFRecord 目录 |
+| `--split` / `--case_idx` | `test` / 0 | 划分与 case |
+| `--timestep` | 0 | 取哪帧速度（0=初始未发展；建议 300 看成熟卡门街）|
+| `--num_modes` | 6 | 特征模态数 |
+| `--K0` / `--K1` | 64 / 256 | 两级段数 |
+| `--tau` | 1.0 | SLIC 紧致度 |
+| `--output_dir` | `./partition_vis` | 输出根目录（自动加 `case{idx}` 子目录）|
+| `--use_cotangent` | True | 用余切(FEM) Laplacian（更贴近连续算子）|
+| `--boundary_type` | `neumann` | 边界条件：`neumann`/`dirichlet` |
+| `--plot_physics` | False | 额外画 G/ω/M/S 四物理指标 |
+| `--plot_routing` | False | 额外跑 M3 路由并画折叠/保留结果 + 打印 T |
+| `--route_pct` | 70.0 | 路由 DEMO 阈值（L1 段聚合 |phys| 的百分位）|
+| `--route_channels` | `omega` | DEMO 用哪些通道判活跃（默认仅 ω）|
+| `--log_file` / `--no_log` | None / False | 控制台输出另存文本日志 / 关闭日志 |
+
+### B.8 `train_amr_m4gn.py` — 单 case overfit（M4，集成自检）
+
+**作用**：在单 case 上过拟合验证端到端管线（NMSE 应单调下降至 ~0）。同时是 `per_channel_nmse`/`move_cache` 的定义处。参数与 B.2 类似，特有：`--cache_dir` 不填时用 `build_cache` 现场建缓存；`--K0/--K1` 现建缓存时的段数。
+
+### B.9 原始 baseline（NVIDIA 自带，非 AMR）
+
+- `train.py`：hydra + DDP 的 stock MGN 训练，配置在 `conf/config.yaml`。
+- `inference.py`：stock MGN rollout，出 `animations/animation_{u,v,p}.gif`（**本次新增的 AMR GIF 即仿此风格**）。
+- `data_amr.py`：`VortexSheddingDataset` 的子类，额外暴露 `graph.pos`/`gidx` 及 `get_cache`，是 AMR 路线的数据入口。
+
+---
+
+## 附录 C：标准复现流程（端到端命令序列）
+
+```bash
+cd examples/cfd/vortex_shedding_mgn
+
+# 0) 预处理：train 与 test 各建一次几何缓存
+python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split train --num_cases 20 --out_dir ./amr_cache
+python preprocess_partitions.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --split test  --num_cases 1  --out_dir ./amr_cache
+
+# 1) （可选）标定 D3 阈值 → 11_threshold_calibration.png（推荐 ω≈8.9）
+python calibrate_thresholds.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --num_cases 4 --num_steps 50 --stride 5
+
+# 2) 训练 AMR-M4GN 与 MGN（同预算）
+python train_amr_m4gn_full.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --num_cases 20 --num_steps 100 --batch_size 2 --epochs 200 --noise_std 0.02 --omega_thresh 8.9
+python train_mgn_baseline.py  --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --num_cases 20 --num_steps 100 --batch_size 2 --epochs 200 --noise_std 0.02
+
+# 3) 单帧预测面板 + rollout 曲线 + 场 GIF
+python inference_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch199.pt --split test --case_idx 0 --num_steps 90 --rollout 80 --omega_thresh 8.9 --gif --gif_fields u v p
+
+# 4) AMR vs MGN 对比曲线
+python compare_baselines.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --amr_ckpt ./checkpoints_amr/amr_m4gn_epoch199.pt --mgn_ckpt ./checkpoints_mgn/mgn_epoch199.pt --split test --case_idx 0 --num_steps 90 --rollout 80 --omega_thresh 8.9
+```

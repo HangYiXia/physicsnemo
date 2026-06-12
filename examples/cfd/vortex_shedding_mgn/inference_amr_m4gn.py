@@ -1,18 +1,29 @@
 """
-inference_amr_m4gn.py — single-step prediction + visualization (M5 step 4)
-==========================================================================
-Loads a trained AMRM4GN checkpoint, predicts one frame of a case, denormalizes,
-and plots prediction vs ground-truth vs |error| for (du, dv, p) as a 3x3 panel
-(09_prediction.png). Also prints per-channel normalized error.
+inference_amr_m4gn.py — prediction + visualization (single-step / rollout / GIF) (M5)
+====================================================================================
+Loads a trained AMRM4GN checkpoint and visualizes it in three modes:
 
-This answers "can I finally SEE the result?": the panel shows how close the
-model's predicted increment/pressure fields are to the truth, drawn on the mesh.
-(Multi-step rollout + full Sec-6.4 metrics + baseline comparison come next.)
+  (default)    single-step: predict one frame, plot pred / GT / |error| for
+               (du, dv, p) as a 3x3 panel (09_prediction.png) + per-channel
+               NMSE/RMSE.
+  --rollout R  autoregressive rollout of R steps; plot velocity RMSE vs step
+               (10_rollout_rmse.png), the error-accumulation curve.
+  --gif        on top of a rollout, save an animated field GIF (top: prediction,
+               bottom: ground-truth) for each --gif_fields var, in the same
+               style as the stock inference.py (animations/amr_m4gn_*.gif).
+
+`--rollout`/`--gif` need the interior `rollout_mask`, so use `--split test`.
 
 Usage:
+    # single-step panel
     python inference_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow \
-        --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch49.pt \
-        --case_idx 0 --timestep 25 --num_steps 50 --omega_thresh 30
+        --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch199.pt \
+        --case_idx 0 --timestep 25 --num_steps 50 --omega_thresh 8.9
+    # rollout RMSE curve + field GIFs (u/v/p)
+    python inference_amr_m4gn.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow \
+        --cache_dir ./amr_cache --ckpt ./checkpoints_amr/amr_m4gn_epoch199.pt \
+        --split test --case_idx 0 --num_steps 90 --rollout 80 --omega_thresh 8.9 \
+        --gif --gif_fields u v p
 """
 
 from __future__ import annotations
@@ -27,10 +38,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.tri as tri
+from matplotlib import animation
+from matplotlib.patches import Rectangle
 
 from data_amr import VortexSheddingDatasetAMR
 from amr_m4gn.model import AMRM4GN
 from train_amr_m4gn import move_cache
+
+
+VAR_ID = {"u": 0, "v": 1, "p": 2}
 
 
 def _denorm(x, mean, std):
@@ -73,18 +89,26 @@ def run_rollout(model, ds, cache, case_idx, steps, thr, device, out_dir):
     """Autoregressive rollout (baseline-style): only `rollout_mask` (interior)
     nodes are updated by the predicted increment; boundary nodes keep GT. Each
     step feeds the previous predicted velocity as the next input. Plots velocity
-    RMSE vs rollout step (error accumulation).
+    RMSE vs rollout step (error accumulation), and returns the per-step RMSE plus
+    the full predicted / ground-truth fields (for the GIF).
+
+    Returns
+    -------
+    rmse_list : list[float]                       velocity RMSE per step
+    preds     : list[np.ndarray[N,3]]  (u, v, p)  prediction in PHYSICAL units
+    exacts    : list[np.ndarray[N,3]]  (u, v, p)  ground-truth in PHYSICAL units
     """
     ns = {k: torch.as_tensor(v).to(device) for k, v in ds.node_stats.items()}
     mask = ds.rollout_mask[case_idx].to(device).bool().view(-1, 1)  # [N,1], True=update
     mask2 = mask.repeat(1, 2)
     spc = ds.num_steps - 1
-    rmse_list = []
+    rmse_list, preds, exacts = [], [], []
     cur_vel_norm = None
     for t in range(steps):
         g = ds[case_idx * spc + t].to(device)
         gt_vel_t = g.x[:, 0:2] * ns["velocity_std"] + ns["velocity_mean"]
         exact_next = gt_vel_t + (g.y[:, 0:2] * ns["velocity_diff_std"] + ns["velocity_diff_mean"])
+        exact_p = g.y[:, 2] * ns["pressure_std"] + ns["pressure_mean"]
         invar = g.x.clone()
         if cur_vel_norm is not None:
             invar[:, 0:2] = cur_vel_norm
@@ -96,9 +120,12 @@ def run_rollout(model, ds, cache, case_idx, steps, thr, device, out_dir):
         vt_phys = invar[:, 0:2] * ns["velocity_std"] + ns["velocity_mean"]
         new_vel = vt_phys + diff
         cur_vel_norm = (new_vel - ns["velocity_mean"]) / ns["velocity_std"]
+        pred_p = pred[:, 2] * ns["pressure_std"] + ns["pressure_mean"]
         m = mask.view(-1)
         rmse = torch.sqrt(((new_vel[m] - exact_next[m]) ** 2).mean()).item()
         rmse_list.append(rmse)
+        preds.append(torch.cat([new_vel, pred_p.unsqueeze(1)], dim=1).cpu().numpy())
+        exacts.append(torch.cat([exact_next, exact_p.unsqueeze(1)], dim=1).cpu().numpy())
 
     print("  rollout velocity RMSE per step (first/mid/last): "
           f"{rmse_list[0]:.3e} / {rmse_list[len(rmse_list)//2]:.3e} / {rmse_list[-1]:.3e}")
@@ -111,7 +138,48 @@ def run_rollout(model, ds, cache, case_idx, steps, thr, device, out_dir):
     plt.savefig(save, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {save}")
-    return rmse_list
+    return rmse_list, preds, exacts
+
+
+def make_gif(pos, cells, preds, exacts, var_idx, var_name, save_path, frame_skip):
+    """Animated field GIF, 2 rows (top: prediction, bottom: ground-truth), in the
+    style of the stock inference.py. Color scale is fixed to the GT range across
+    all frames so the animation is comparable frame-to-frame."""
+    triang = tri.Triangulation(pos[:, 0], pos[:, 1], cells)
+    pred_i = [p[:, var_idx] for p in preds]
+    exact_i = [e[:, var_idx] for e in exacts]
+    vmin = float(np.min([e.min() for e in exact_i]))
+    vmax = float(np.max([e.max() for e in exact_i]))
+
+    plt.rcParams["image.cmap"] = "inferno"
+    fig, ax = plt.subplots(2, 1, figsize=(16, 9))
+    fig.set_facecolor("black")
+    for a in ax:
+        a.set_facecolor("black")
+
+    def animate(num):
+        n = num * frame_skip
+        for a, field, title in (
+            (ax[0], pred_i[n], f"AMR-M4GN Prediction ({var_name})"),
+            (ax[1], exact_i[n], f"Ground Truth ({var_name})"),
+        ):
+            a.cla()
+            a.set_axis_off()
+            a.add_patch(Rectangle((0, 0), 1.4, 0.4, facecolor="navy"))
+            a.tripcolor(triang, field, vmin=vmin, vmax=vmax)
+            a.triplot(triang, "ko-", ms=0.5, lw=0.3)
+            a.set_title(title, color="white")
+            a.set_aspect("auto", adjustable="box")
+            a.autoscale(enable=True, tight=True)
+        fig.subplots_adjust(left=0.05, bottom=0.05, right=0.95, top=0.95,
+                            wspace=0.1, hspace=0.2)
+        return fig
+
+    ani = animation.FuncAnimation(
+        fig, animate, frames=len(pred_i) // frame_skip, interval=100)
+    ani.save(save_path, writer="pillow")
+    plt.close(fig)
+    print(f"  Saved: {save_path}")
 
 
 def main():
@@ -129,6 +197,16 @@ def main():
     p.add_argument("--rollout", type=int, default=0,
                    help="if >0, autoregressive rollout this many steps; needs "
                         "rollout_mask -> use --split test")
+    p.add_argument("--gif", action="store_true", default=False,
+                   help="save animated field GIF(s) from the rollout (implies "
+                        "rollout; needs --split test). One GIF per --gif_fields.")
+    p.add_argument("--gif_fields", type=str, nargs="+", default=["u", "v", "p"],
+                   choices=list(VAR_ID.keys()),
+                   help="which field(s) to animate: u, v, p (default all three)")
+    p.add_argument("--frame_skip", type=int, default=1,
+                   help="use every N-th rollout frame in the GIF (default 1)")
+    p.add_argument("--gif_dir", type=str, default="./animations",
+                   help="output dir for the GIFs (default ./animations)")
     p.add_argument("--out_dir", type=str, default="./inference_vis")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
@@ -157,11 +235,21 @@ def main():
     thr = {"G": float("inf"), "omega": args.omega_thresh,
            "M": float("inf"), "S": float("inf")}
 
-    if args.rollout > 0:
+    if args.rollout > 0 or args.gif:
         if not ds.rollout_mask:
-            raise ValueError("rollout needs rollout_mask; use --split test")
-        run_rollout(model, ds, cache, args.case_idx, args.rollout, thr,
-                    device, args.out_dir)
+            raise ValueError("rollout/gif needs rollout_mask; use --split test")
+        steps = args.rollout if args.rollout > 0 else args.num_steps - 1
+        _, preds, exacts = run_rollout(model, ds, cache, args.case_idx, steps,
+                                       thr, device, args.out_dir)
+        if args.gif:
+            os.makedirs(args.gif_dir, exist_ok=True)
+            pos = cache["pos"].cpu().numpy()
+            cells = np.asarray(ds.cells[args.case_idx])
+            for f in args.gif_fields:
+                save = os.path.join(args.gif_dir,
+                                    f"amr_m4gn_case{args.case_idx}_{f}.gif")
+                make_gif(pos, cells, preds, exacts, VAR_ID[f], f, save,
+                         args.frame_skip)
         print("done.")
         return
 
