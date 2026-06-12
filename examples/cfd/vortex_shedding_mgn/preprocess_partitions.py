@@ -43,8 +43,14 @@ def _segment_centroids(pos_t: torch.Tensor, assign: torch.Tensor, K: int) -> tor
 
 
 def build_cache(data_dir, split, case_idx, K0, K1, num_modes, tau,
-                use_cotangent=True, boundary_type="neumann", steps=16):
-    """Build the geometry/partition cache dict for one case."""
+                use_cotangent=True, boundary_type="neumann", steps=16,
+                use_modal=True):
+    """Build the geometry/partition cache dict for one case.
+
+    use_modal=False (M6 ablation "w/o Modal Decomp"): zero the modal features so
+    the SLIC refinement is guided by geometry (obstacle distance + position)
+    only, i.e. a METIS+geometry partition without Laplacian-eigenmode guidance.
+    """
     data = load_single_case(data_dir, split, case_idx, timestep=0)
     pos = data["mesh_pos"]             # np [N,2]
     cells = data["cells"]              # np [C,3]
@@ -61,6 +67,8 @@ def build_cache(data_dir, split, case_idx, K0, K1, num_modes, tau,
         use_cotangent=use_cotangent,
         boundary_type=boundary_type,
     )
+    if not use_modal:
+        f_md = np.zeros_like(np.asarray(f_md))
 
     f_obs = None
     for obs_id in [6, 1]:
@@ -115,15 +123,21 @@ def main():
     p.add_argument("--tau", type=float, default=1.0)
     p.add_argument("--steps", type=int, default=16)
     p.add_argument("--out_dir", type=str, default="./amr_cache")
+    p.add_argument("--no_modal", action="store_true", default=False,
+                   help="M6 ablation: build the partition WITHOUT modal-decomp "
+                        "guidance (geometry-only SLIC); writes a *_nomodal.pt "
+                        "cache so it never overwrites the modal cache.")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
+    suffix = "_nomodal" if args.no_modal else ""
     for c in range(args.case_start, args.case_start + args.num_cases):
-        print(f"[preprocess] case {c} ({args.split}) ...")
+        print(f"[preprocess] case {c} ({args.split}{suffix}) ...")
         cache = build_cache(args.data_dir, args.split, c,
                             args.K0, args.K1, args.num_modes, args.tau,
-                            steps=args.steps)
-        path = os.path.join(args.out_dir, f"partition_cache_{args.split}_{c}.pt")
+                            steps=args.steps, use_modal=not args.no_modal)
+        path = os.path.join(
+            args.out_dir, f"partition_cache_{args.split}_{c}{suffix}.pt")
         torch.save(cache, path)
         print(f"  saved {path}  (K0={cache['meta']['K0']}, K1={cache['meta']['K1']})")
     print("done.")

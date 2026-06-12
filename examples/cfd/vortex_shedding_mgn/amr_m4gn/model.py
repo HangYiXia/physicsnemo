@@ -47,9 +47,19 @@ class AMRM4GN(nn.Module):
         threshold_ranges: dict | None = None,
         vel_mean=None,
         vel_std=None,
+        use_amr: bool = True,
+        use_transformer: bool = True,
+        use_rwse: bool = True,
     ):
         super().__init__()
         self.hidden = hidden
+        # ----- M6 ablation switches (Design Doc 6.5) -----
+        # use_amr=False        : keep every L1 segment fine (fixed K=K1, no fold)
+        # use_transformer=False: decode from micro features only (zero global)
+        # use_rwse=False       : zero the segment-level RWSE positional encoding
+        self.use_amr = use_amr
+        self.use_transformer = use_transformer
+        self.use_rwse = use_rwse
         self.micro = MicroGNN(in_nodes=in_nodes, in_edges=in_edges,
                               hidden=hidden, processor_size=processor_size)
         pe_in = rwse_steps + 1 + 2  # rwse + depth + centroid(x,y)
@@ -113,6 +123,12 @@ class AMRM4GN(nn.Module):
 
         h_node = self.micro(graph.x, graph.edge_attr, graph)
 
+        # M6 ablation "w/o Transformer": skip routing + macro entirely, decode
+        # from the local feature only (global branch zeroed -> ~plain MGN).
+        if not self.use_transformer:
+            h_cat = torch.cat([h_node, torch.zeros_like(h_node)], dim=1)
+            return self.decoder(h_cat)
+
         # physical velocity for the indicators (D1)
         u, v = graph.x[:, 0], graph.x[:, 1]
         if self.vel_mean is not None:
@@ -123,14 +139,22 @@ class AMRM4GN(nn.Module):
             u=u, v=v, pos=pos_g, edge_index=graph.edge_index, area=area_g,
         )
 
+        # M6 ablation "w/o AMR": force every L1 segment to stay fine (fixed
+        # K=K1, no folding) by routing with -inf thresholds (everything active).
+        all_active = {"G": float("-inf"), "omega": float("-inf"),
+                      "M": float("-inf"), "S": float("-inf")}
+
         # per-graph routing, then globally offset the token ids
         kept_parts, depth_parts, rwse_parts, cen_parts, tb_parts = [], [], [], [], []
         tok_off = 0
         for b in range(B):
             s, e = int(ptr[b]), int(ptr[b + 1])
             phys_b = {k: val[s:e] for k, val in phys.items()}
-            thr_b = thresholds if thresholds is not None else \
-                sample_thresholds(self.ranges, training=self.training)
+            if not self.use_amr:
+                thr_b = all_active
+            else:
+                thr_b = thresholds if thresholds is not None else \
+                    sample_thresholds(self.ranges, training=self.training)
             ka, dep, T, _ = route(caches[b]["levels"], phys_b, thr_b)
             rw, ce = self._assemble_token_pe(caches[b], ka, dep, T)
             kept_parts.append(ka + tok_off)
@@ -146,6 +170,9 @@ class AMRM4GN(nn.Module):
         cen_t = torch.cat(cen_parts, 0)
         token_batch = torch.cat(tb_parts, 0)
         T_total = tok_off
+
+        if not self.use_rwse:
+            rwse_t = torch.zeros_like(rwse_t)   # M6 ablation "w/o RWSE PE"
 
         h_seg = self.seg_enc(h_node, kept_assign, T_total, rwse_t, depth, cen_t)
         if B == 1:

@@ -8,7 +8,7 @@
 **主线 Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
 **对比 Baseline**：MGN、X-MeshGraphNet (X-MGN)、M4GN、节点级 Graph-Transformer
 
-> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 小验证档通过（AMR>MGN，仅"更大训练集"待算力）· M6 ⬜ · M7 ⬜
+> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 ✅ · M5 🟢 小验证档通过（AMR>MGN，仅"更大训练集"待算力）· **M6 🟡 代码+脚本+单测就绪，消融实跑待算力** · M7 ⬜
 > **文档索引**：本设计文档 `AMR_M4GN_Design_Doc.md`；阶段手册 `AMR_M4GN_Progress_M1.md`〜`_M4.md`（各含「拿到代码后每步做什么/为什么/应得什么」的操作说明）。
 
 > **一句话定位**：在非结构三角网格上，用「局部 GNN（短程、高频物理）+ 段级 Transformer（全局、长程压力耦合）+ 物理驱动的自适应 Token 化（AMR）」三者融合的混合架构，在几乎不增加计算量的前提下解决 MeshGraphNet 的长程依赖丢失与过平滑问题，并为大规模湍流（EAGLE）提供可扩展路径。
@@ -429,16 +429,18 @@ G:U[0.1,2.0]  ω:U[0.2,4.0]  M:U[0.5,10.0]  S:U[0.2,4.0]
 
 ### 6.5 消融实验计划
 
-| 实验 | 配置 | 验证什么 |
-| --- | --- | --- |
-| Full model | AMR-M4GN | 完整性能 |
-| w/o AMR | 固定 K=256 | AMR 的效率贡献（对照 M4GN 固定 K）|
-| w/o Transformer | 只有 15 步 GNN | Transformer 的精度贡献（对照 MGN）|
-| w/o Modal Decomp | METIS-only 分区 | 模态分解的分区质量贡献 |
-| w/o RWSE PE | 去掉段级 RWSE | 位置编码必要性 |
-| w/o δ=1 重叠 | δ=0 | 段重叠对段边界连续性的贡献 |
-| w/o 虚拟步 | 仅当前帧 phys | 虚拟步外推对 rollout 的贡献 |
-| 7 步 vs 15 步 GNN | processor_size=7/15 | 深度 GNN 的收益 vs 过平滑 |
+> M6 落地：开关见 `run_ablation.py`/`model.py`。✅=已接线可跑、❌=未实现/未接线（见 `AMR_M4GN_Progress_M6.md` §0）。
+
+| 实验 | 配置 | 验证什么 | 可跑 |
+| --- | --- | --- | --- |
+| Full model | AMR-M4GN | 完整性能 | ✅ |
+| w/o AMR | 固定 K=256（`use_amr=False`）| AMR 的效率贡献（对照 M4GN 固定 K）| ✅ |
+| w/o Transformer | 只有 15 步 GNN（`use_transformer=False`）| Transformer 的精度贡献（对照 MGN）| ✅ |
+| w/o Modal Decomp | 几何-only 分区（预处理 `--no_modal`）| 模态分解的分区质量贡献 | ✅ |
+| w/o RWSE PE | 去掉段级 RWSE（`use_rwse=False`）| 位置编码必要性 | ✅ |
+| w/o δ=1 重叠 | δ=0 | 段重叠对段边界连续性的贡献 | ❌ 未实现 |
+| w/o 虚拟步 | 仅当前帧 phys | 虚拟步外推对 rollout 的贡献 | ❌ 未接线 |
+| 7 步 vs 15 步 GNN | processor_size=7/15 | 深度 GNN 的收益 vs 过平滑 | ✅ |
 
 ---
 
@@ -536,7 +538,7 @@ def rwse_node(edge_index: Tensor[2, E], num_nodes: int,
 - **输入来源**：`seg_adj` 来自 `segmentation.build_partition_tree` 已返回的 `segment_adjacency`；`edge_index` 来自 graph。
 - **输出**：写入缓存 `rwse_L0 [K0,16]`、`rwse_L1 [K1,16]`、`node_pe [N,16]`。
 - **单元测试**：(1) 链状 5 段图，验证端点段的回归概率 < 中间段；(2) 全连接 3 段，RWSE 应近似相等；(3) 数值检查 `P` 行和为 1。
-- **不确定点 U3**：节点级绝对 PE 是否真正提升精度，M4GN 消融显示「视情况」。**先实现接口、默认开启，在 M6 用 `w/o RWSE PE` 消融决定保留与否。**
+- **不确定点 U3**：节点级绝对 PE 是否真正提升精度，M4GN 消融显示「视情况」。**已实现接口、默认开启；M6 用 `use_rwse=False`（`run_ablation.py` 的 `w/o RWSE` 行）消融，待实跑数据决定保留与否。**
 
 #### 7.4.2 `amr_m4gn/physics_ops.py`（新建）— N-S 物理量算子
 
@@ -737,10 +739,11 @@ class AMRM4GN(nn.Module):
 ### M6 — 消融实验（5 天）
 
 - **目标**：验证各模块贡献。
-- **改动**：在 `config_amr_m4gn.yaml` 加开关（`use_amr/use_transformer/use_modal/use_rwse/use_overlap/use_virtual_step/processor_size`），无需大改代码。
+- **改动**：模型加开关 `use_amr/use_transformer/use_rwse`（`model.py` forward 零侵入接线）、预处理加 `--no_modal`、训练入口透传开关、新建编排脚本 `run_ablation.py` + 单测 `tests/test_ablation.py`。`processor_size` 本就是参数（7/15）。
 - **配合数据**：全量数据，复用 M5 流程。
-- **退出标准**：§6.5 八组消融表 + 分析；明确各模块净贡献。
+- **退出标准**：§6.5 消融表 + 分析；明确各模块净贡献。
 - **🚩 决策门 D8（裁剪）**：根据消融结果，对净贡献为负/可忽略的模块（如 RWSE、虚拟步）在最终模型中关闭，简化架构。
+- **状态 🟡（代码就绪，实跑待算力）**：开关/脚本/单测全部完成，覆盖 §6.5 的 **6/8 行**；**未实跑**（本机无算力）。未覆盖 2 行：`w/o δ=1 重叠`（segmentation 无重叠逻辑，缺对象）、`w/o 虚拟步`（`virtual_step()` 已实现但 forward 未喂 `u_prev`，缺「有虚拟步」对照臂）——需补实现后纳入。详见 `AMR_M4GN_Progress_M6.md`。
 
 ### M7 — EAGLE 大规模扩展（可选，5 天）
 

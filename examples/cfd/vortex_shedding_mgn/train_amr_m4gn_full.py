@@ -57,6 +57,14 @@ def main():
                         "the fixed omega threshold")
     p.add_argument("--ckpt_dir", type=str, default="./checkpoints_amr")
     p.add_argument("--ckpt_every", type=int, default=10)
+    p.add_argument("--tag", type=str, default="amr_m4gn",
+                   help="checkpoint filename prefix (use to separate ablations)")
+    p.add_argument("--no_amr", action="store_true", default=False,
+                   help="M6 ablation: disable AMR routing (fixed K=K1)")
+    p.add_argument("--no_transformer", action="store_true", default=False,
+                   help="M6 ablation: disable macro Transformer (GNN only)")
+    p.add_argument("--no_rwse", action="store_true", default=False,
+                   help="M6 ablation: zero the segment-level RWSE PE")
     p.add_argument("--device", type=str,
                    default="cuda" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
@@ -79,6 +87,8 @@ def main():
     model = AMRM4GN(
         in_nodes=6, in_edges=3, out_dim=3, hidden=args.hidden,
         processor_size=args.processor_size, vel_mean=vel_mean, vel_std=vel_std,
+        use_amr=not args.no_amr, use_transformer=not args.no_transformer,
+        use_rwse=not args.no_rwse,
     ).to(device)
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -108,7 +118,7 @@ def main():
         if epoch % 5 == 0 or epoch == args.epochs - 1:
             print(f"epoch {epoch:4d}  NMSE {epoch_loss:.4e}  lr {sched.get_last_lr()[0]:.2e}")
         if (epoch + 1) % args.ckpt_every == 0 or epoch == args.epochs - 1:
-            path = os.path.join(args.ckpt_dir, f"amr_m4gn_epoch{epoch}.pt")
+            path = os.path.join(args.ckpt_dir, f"{args.tag}_epoch{epoch}.pt")
             torch.save({"epoch": epoch, "model": model.state_dict(),
                         "opt": opt.state_dict()}, path)
     print(f"done. checkpoints in {args.ckpt_dir}")
