@@ -189,7 +189,3 @@ examples/cfd/vortex_shedding_mgn/raw_dataset/
 checkpoints_amr/
 checkpoints_mgn/
 amr_cache/
-inference_vis/
-partition_vis/
-edge_stats.json
-node_stats.json
