@@ -2,19 +2,19 @@
 
 **更新日期**：2026年6月11日
 **当前阶段**：M5 — 全量训练 + baseline 对比（批处理 `batch_size>1` → 完整训练入口 → `inference_amr_m4gn` rollout/指标/可视化 → D3 阈值标定）
-**M5 状态**：🚧 **进行中**。M5 较重、分小步推进，**每小步都配可单独验证的单测 + 文档**。
+**M5 状态**：🟢 **小验证档全部实跑完成**（6 小步均闭环；全量/多 baseline 待算力）。M5 较重、分小步推进，**每小步都配可单独验证的单测 + 文档**。
 - 小步 1（批处理注意力隔离）：**单测 3/3 实跑通过**（含跨图不泄漏）。
 - 小步 2（model 批处理集成）：**单测 2/2 + 单图回归 3/3 实跑通过**（batch==逐图拼接）。
 - 小步 3（完整训练入口）：**多 case batch 训练实跑通过**——NMSE 3.06→~0.08（降约 35×），checkpoint 已存。
 - 小步 4（inference + 预测可视化）：**实跑通过**——预测场与真值场形态高度吻合（`09_prediction_case0_t25.png`），端到端「训练→推理→可视化」闭环打通。
 - 小步 4b（rollout + 误差曲线）：**实跑通过**——50 步自回归 RMSE 0.107→~0.35 后**平台饱和、不发散**，rollout 机制正确。
 - 小步 5（D3 阈值标定）：**实跑通过，D3 已拍板**——推荐绝对 ω 阈值≈8.9（T≈164），训练期采样区间 [2.83, 25.8]，K0=64/K1=256 确认合适。
-- 小步 6（放大训练 + baseline 对比）：**脚本已就绪，待你实跑**（小验证档：20 case×100 步×各 200 epoch）。
+- 小步 6（放大训练 + baseline 对比）：**全部实跑完成**——同预算下 **AMR-M4GN rollout RMSE 全程低于 MGN，长程优势明显**（见 `12_compare_rollout_case0.png`）。
 **前置**：M1/M2/M3 ✅、M4 🟢（端到端管线跑通，overfit NMSE 0.92→0.013）。
 **配套设计文档**：`AMR_M4GN_Design_Doc.md`（§7.2-C 批处理 / §八 M5）
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
 
-> **里程碑总进度**（截至 2026-06-11）：M1 ✅ · M2 ✅ · M3 ✅ · M4 🟢 · **M5 🚧** · M6 ⬜ · M7 ⬜
+> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 🟢 · **M5 🟢 小验证档通过（AMR>MGN，全量待算力）** · M6 ⬜ · M7 ⬜
 > **文档索引**：M1〜M4 见各 `AMR_M4GN_Progress_M*.md`；设计 `AMR_M4GN_Design_Doc.md`
 > 本文同样遵循「拿到代码后每步：做什么 → 为什么 → 应该得到什么结果」。
 
@@ -30,7 +30,7 @@
 | 4. `inference_amr_m4gn.py` | 预测场可视化（pred vs GT + 误差）+ 指标；rollout 后续 | ✅ 实跑通过（预测≈真值）|
 | 4b. rollout + 误差曲线 | 自回归多步 rollout（边界 mask）+ 速度 RMSE-vs-step 曲线 | ✅ 实跑通过（0.107→~0.35 饱和，不发散）|
 | 5. D3 最终标定 | 训练期绝对阈值采样，统计全训练集 T 分布，定 K0/K1 与区间 | ✅ 实跑通过，D3 拍板（ω 阈值≈8.9，区间 [2.83,25.8]）|
-| 6. 放大训练 + baseline 对比 | MGN baseline（同预算）+ rollout 对比脚本；小验证档 20case×100步×200ep | ✅ 脚本就绪，待你实跑训练+对比 |
+| 6. 放大训练 + baseline 对比 | MGN baseline（同预算）+ rollout 对比脚本；小验证档 20case×100步×200ep | ✅ **实跑完成**（20case×100步×200ep；AMR rollout 全程优于 MGN）|
 
 ---
 
@@ -374,19 +374,32 @@ compare_baselines.py    ✅ 新建：两 checkpoint → test 同款 rollout → 
 #### 步骤 5 — 对比 rollout
 - **做什么**：`python compare_baselines.py --data_dir ./raw_dataset/cylinder_flow/cylinder_flow --cache_dir ./amr_cache --amr_ckpt ./checkpoints_amr/amr_m4gn_epoch199.pt --mgn_ckpt ./checkpoints_mgn/mgn_epoch199.pt --split test --case_idx 0 --num_steps 90 --rollout 80 --omega_thresh 8.9`
 - **为什么**：M5 退出标准——在相同预算下看 AMR-M4GN 的 rollout 误差与参数量相对 MGN 的表现。
-- **应该得到什么**：终端打印两模型参数量 + step-1/final/mean 速度 RMSE；`./inference_vis/12_compare_rollout_case0.png`（两条 RMSE-vs-step 曲线）。**期望 AMR-M4GN 的 rollout RMSE ≤ MGN（尤其长程）**，体现全局 Transformer 对长程压力耦合的价值；若没体现，记录下来（可能小规模不够、或需调超参）。
-- **状态**：⏳ **待你实跑**。
+- **应该得到什么**：终端打印两模型参数量 + step-1/final/mean 速度 RMSE；`./inference_vis/12_compare_rollout_case0.png`（两条 RMSE-vs-step 曲线）。
+- **实测结果（20 case×100 步×200 epoch，case0 test，rollout 80 步）**：
+  - **训练（in-sample）NMSE**：AMR-M4GN epoch199 = **6.22e-3**（最低 ~5.4e-3 @epoch180）；MGN epoch199 = **8.24e-3**（最低 ~8.1e-3 @epoch185）。**同预算下 AMR 训练误差也更低**。
+  - 参数量：**AMR-M4GN 3.18M vs MGN 2.33M**（AMR 多 ~36%，多在 macro Transformer）；
+  - 速度 RMSE（**test split case0，模型未训练过**）：step1 **2.021e-02 vs 2.300e-02**；final(step80) **1.143e-01 vs 1.331e-01**；**mean 7.804e-02 vs 9.423e-02**（AMR 平均低 ~17%）；
+  - **AMR-M4GN 曲线全程在 MGN 之下，且 step≈20 之后长程差距明显拉大**——正是全局 Transformer 抑制长程误差累积的设计目标。
+- **状态**：✅ **实跑通过，AMR-M4GN 全程优于 MGN（含 mean RMSE）**。
 
 ### 验收
 
 | 验收点 | 命令 | 合格判据 | 状态 |
 | --- | --- | --- | --- |
-| AMR-M4GN 放大训练 | 步骤 2 | NMSE 下降、出 checkpoint | ⏳ 待实跑 |
-| MGN baseline 训练 | 步骤 3 | NMSE 下降、出 checkpoint | ⏳ 待实跑 |
-| rollout 对比 | 步骤 5 | 出 `12_compare_rollout_case0.png` + 指标，AMR 不差于 MGN | ⏳ 待实跑 |
+| AMR-M4GN 放大训练 | 步骤 2 | NMSE 下降、出 checkpoint | ✅ 实跑完成（epoch199 NMSE 6.22e-3，checkpoint 已生成）|
+| MGN baseline 训练 | 步骤 3 | NMSE 下降、出 checkpoint | ✅ 实跑完成（epoch199 NMSE 8.24e-3，checkpoint 已生成）|
+| rollout 对比 | 步骤 5 | 出 `12_compare_rollout_case0.png` + 指标，AMR 不差于 MGN | ✅ **AMR 全程优于 MGN**（step1 0.020/0.023，final 0.114/0.133，mean 0.078/0.094）|
 
-> 跑完把两段训练日志 + 对比图 + 指标发我，据实回填 M5 退出结论（AMR-M4GN vs MGN）。
-> **诚实预期**：小验证档（20 case）规模有限，AMR 的长程优势可能只是初现或不明显；这一步先验证「流程跑通 + 趋势」，是否上更大规模据此再定。
+### 🚩 M5 退出结论（小验证档）
+
+- **结论（正面）**：相同训练预算（20 case×100 步×200 epoch、同 noise/NMSE/lr）下，**AMR-M4GN 的 rollout 误差全程低于 MGN baseline（mean 0.078 vs 0.094，低 ~17%），且长程（step>20）优势明显**；训练 in-sample NMSE 也更低（6.22e-3 vs 8.24e-3）——初步验证了「局部 GNN + 全局段级 Transformer」对长程依赖/误差累积的价值。
+- **如实标注的边界**：
+  1. 这是 **3.18M vs 2.33M**，非等参对比；AMR 多 ~36% 参数。结论是「同训练预算下更优」，等参/等算力对比待补；
+  2. 规模为 **小验证档（20 case，单 case 对比）**，非全量、非多 case 平均，**不构成论文级定论**；
+  3. 对比对象只有 MGN，**X-MGN 等其他 baseline 未做**。
+- **下一步（M5 完整退出 / M6-M7）**：放大到中/全量档、多 case 平均指标、加 X-MGN 对比、（可选）等参对照。
+
+> **本次实跑精确数字（已补入上表）**：训练 NMSE AMR 6.22e-3 / MGN 8.24e-3；test case0 rollout 速度 RMSE step1 0.020/0.023、final 0.114/0.133、mean 0.078/0.094（AMR/MGN）。
 
 ---
 

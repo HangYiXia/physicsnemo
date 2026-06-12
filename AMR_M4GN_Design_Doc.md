@@ -8,7 +8,7 @@
 **主线 Baseline**：PhysicsNeMo MeshGraphNet (MGN) 圆柱绕流训练脚本
 **对比 Baseline**：MGN、X-MeshGraphNet (X-MGN)、M4GN、节点级 Graph-Transformer
 
-> **里程碑总进度**（截至 2026-06-11）：M1 ✅ · M2 ✅ · M3 ✅ · M4 🟢 管线跑通（overfit 收敛度待调参）· M5 ⬜ · M6 ⬜ · M7 ⬜
+> **里程碑总进度**（截至 2026-06-12）：M1 ✅ · M2 ✅ · M3 ✅ · M4 🟢 · M5 🟢 小验证档通过（AMR>MGN，全量待算力）· M6 ⬜ · M7 ⬜
 > **文档索引**：本设计文档 `AMR_M4GN_Design_Doc.md`；阶段手册 `AMR_M4GN_Progress_M1.md`〜`_M4.md`（各含「拿到代码后每步做什么/为什么/应得什么」的操作说明）。
 
 > **一句话定位**：在非结构三角网格上，用「局部 GNN（短程、高频物理）+ 段级 Transformer（全局、长程压力耦合）+ 物理驱动的自适应 Token 化（AMR）」三者融合的混合架构，在几乎不增加计算量的前提下解决 MeshGraphNet 的长程依赖丢失与过平滑问题，并为大规模湍流（EAGLE）提供可扩展路径。
@@ -724,14 +724,15 @@ class AMRM4GN(nn.Module):
 - **🚩 决策门 D1（速度反归一化，U4）**：✅ 管线可用——overfit 用 `node_stats` 的 `vel_mean/std` 反归一化算物理量，loss 正常下降，证明该管线在真实数据上不崩、可学。
 - **前置约束**：本里程碑 `batch_size=1`，批内段偏移留 M5。
 
-### M5 — 全量训练 + 对比（5 天）
+### M5 — 全量训练 + 对比（5 天）🟢 小验证档通过（全量待算力）
 
 - **目标**：与 MGN、X-MGN baseline 公平对比。
-- **新增改动**：`macro_transformer` 支持 `batch_size>1`（批内段偏移 + padding mask，§7.2-C）；`inference_amr_m4gn.py`（rollout + §6.4 指标）。
-- **配合数据**：全量 train（`num_training_samples` cases）+ test split + 全部缓存。
-- **退出标准**：训练收敛；对比表（NMSE/MAE/单步&多步 RMSE/FLOPs/GPU 时间/显存峰值）；rollout 误差曲线；token 数统计。
-- **🚩 决策门 D6（AMR warm-up 时长，U5）**：根据「关 AMR 阶段」loss 曲线决定何时开 AMR。
-- **🚩 决策门 D7（是否达预期）**：若 AMR-M4GN 长程指标未超 MGN → 排查 Transformer 是否真起作用（查注意力权重是否非平凡），据此决定是否调整段粒度/PE/损失权重。**此为整个课题的关键验证点。**
+- **新增改动**：`macro_transformer` 支持 `batch_size>1`（批内段偏移 + padding mask，§7.2-C，✅）；`train_amr_m4gn_full.py`（多 case batch 训练，✅）；`train_mgn_baseline.py`（同预算 MGN，✅）；`inference_amr_m4gn.py`（rollout + 预测可视化，✅）；`compare_baselines.py`（rollout 对比，✅）；`calibrate_thresholds.py`（D3 标定，✅）。
+- **配合数据**：小验证档 20 train case + test split + 缓存（全量待算力）。
+- **退出标准**：训练收敛；对比表；rollout 误差曲线；token 数统计。**已完成（小验证档）**：批处理/集成单测全过；AMR-M4GN 与 MGN 同预算训练（20 case×100 步×200 epoch，训练 NMSE 6.22e-3 vs 8.24e-3）；`12_compare_rollout_case0.png` 显示 **AMR-M4GN rollout RMSE 全程低于 MGN、长程优势明显**（test case0：step1 0.020/0.023，final 0.114/0.133，mean 0.078/0.094；AMR 3.18M vs MGN 2.33M）。详见 `AMR_M4GN_Progress_M5.md` 小步 6。
+- **🚩 决策门 D3（阈值/K0K1）**：✅ 已标定（ω∈[2.83,25.8]，K0/K1=64/256，见 §八 M3 / `calibrate_thresholds.py`）。
+- **🚩 决策门 D7（是否达预期）**：✅ **小验证档初步达成**——AMR-M4GN 长程 rollout 优于 MGN，方向正确。**完整定论待**：① 中/全量规模 + 多 case 平均；② 等参/等算力对照；③ X-MGN 等更多 baseline。
+- **未覆盖（M5 收尾 / M6-M7）**：全量训练、X-MGN 对比、§6.4 全套指标（FLOPs/显存/GPU 时间）、注意力权重可解释性检查。
 
 ### M6 — 消融实验（5 天）
 

@@ -5,7 +5,7 @@
 **配套设计文档**：`E:\phys\physicsnemo\AMR_M4GN_Design_Doc.md`
 **工作目录**：`E:\phys\physicsnemo\examples\cfd\vortex_shedding_mgn\`
 
-> **里程碑总进度**（截至 2026-06-11）：**M1 ✅** · M2 ✅ · M3 ✅ · M4 🟢 · M5 ⬜ · M6 ⬜ · M7 ⬜
+> **里程碑总进度**（截至 2026-06-12）：**M1 ✅** · M2 ✅ · M3 ✅ · M4 🟢 · M5 🟢（AMR>MGN，全量待算力）· M6 ⬜ · M7 ⬜
 > **文档索引**：M1（本文）· M2 `AMR_M4GN_Progress_M2.md` · M3 `..._M3.md` · M4 `..._M4.md` · 设计 `AMR_M4GN_Design_Doc.md`
 
 > 本文档三件事：(1) 说清 M1 做了什么、为什么、对应 Design Doc 哪里；(2) 给出**从零到跑通 M1 的逐步操作**（装环境→下数据→跑脚本→看图验收）；(3) 列出后续开发（M2 起）的注意事项与决策门。**每一步都标注「为什么这么做」。**
